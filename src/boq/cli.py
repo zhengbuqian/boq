@@ -56,8 +56,13 @@ def cmd_create(args: argparse.Namespace) -> int:
         boq.create()
         log_ok(f"Created boq: {args.name}")
         log_info(f"Location: {boq.boq_dir}")
-        log_info("Container is running. Use 'enter' to attach a shell.")
-        return 0
+
+        if args.enter:
+            log_info(f"Entering boq '{args.name}'...")
+            return boq.enter()
+        else:
+            log_info("Container is running. Use 'enter' to attach a shell.")
+            return 0
     except BoqError as e:
         log_error(str(e))
         return 1
@@ -403,6 +408,11 @@ _boq_completions() {
     done
 
     case "$cmd" in
+        create)
+            if [[ "$cur" == -* ]]; then
+                COMPREPLY=( $(compgen -W "--no-enter" -- "$cur") )
+            fi
+            ;;
         destroy)
             if [[ "$cur" == -* ]]; then
                 COMPREPLY=( $(compgen -W "--force-stop" -- "$cur") )
@@ -463,8 +473,9 @@ def main() -> int:
         description="Universal isolated development environment.",
         epilog="""
 Examples:
-  boq create dev          # Create and start boq
-  boq enter dev           # Attach shell (exit to detach)
+  boq create dev          # Create boq and enter it
+  boq create dev --no-enter  # Create boq without entering
+  boq enter dev           # Re-enter existing boq
   boq run dev "make"      # Run command in boq
   boq diff dev            # See what changed
   boq diff dev ~/project  # See changes in ~/project only
@@ -477,9 +488,11 @@ Examples:
     subparsers = parser.add_subparsers(dest="command", help="Available commands")
 
     # create
-    p = subparsers.add_parser("create", help="Create a new boq and start container")
+    p = subparsers.add_parser("create", help="Create a new boq and enter it")
     p.add_argument("name", help="Boq name")
-    p.set_defaults(func=cmd_create)
+    p.add_argument("--no-enter", dest="enter", action="store_false",
+                   help="Don't enter the boq after creating (default: enter)")
+    p.set_defaults(func=cmd_create, enter=True)
 
     # enter
     p = subparsers.add_parser("enter", help="Attach shell to boq (starts if not running)")

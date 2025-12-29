@@ -2,13 +2,28 @@
 
 Isolated development environment using Linux kernel overlayfs.
 
+## Why boq?
+
+`boq` allows:
+
+* You to use `yolo` or `--dangerously-skip-permissions` mode without worrying about AI screwing up your Linux system.
+* You to instantly create an isolated environment that runs exactly like your familiar system.
+    * All your familiar commands and AI tools ready to use - no need to re-install, login, authenticate, or configure.
+    * Zero learning curve - same shell, same muscle memory, same dotfiles. It just feels like home.
+    * Full access to your entire `$HOME` - all your projects, references, and personal scripts. Not trapped in a single project directory.
+    * Your existing compilers, interpreters, and build cache ready to use - no re-downloading, no re-building.
+* You to run multiple isolated environments simultaneously (`dev`, `experiment`, `feature-x`) - each with independent file changes, but sharing the same build toolchain.
+* You to let multiple AI agents work in parallel on the same project, each in its own isolated environment.
+* You to experiment fearlessly - don't like the result? `boq destroy` and start fresh. No leftover config files, broken dependencies, or system pollution.
+* No Dockerfile to write, no image to build, instant start.
+
+> **Note:** Files unchanged by boq are read from the host in real-time. If you `git pull` on the host, unmodified files will update inside the boq. Best practice: keep host files untouched while AI is working, and sync periodically.
+
 ## Features
 
-- All host tools available at original paths (no PATH hacks)
 - Configurable overlay directories (default: `$HOME`, `/usr`, `/opt`, `/home/linuxbrew`)
 - Passthrough paths that bypass overlay and share with host
 - Full file locking support (unlike fuse-overlayfs)
-- Protected from modifying system files
 - TOML-based configuration with 3-tier override system
 
 ## Installation
@@ -35,10 +50,10 @@ uv pip install -e .               # Editable install
 ## Quick Start
 
 ```bash
-# Create and start a boq
+# Create a boq and enter it (exit shell to detach, container keeps running)
 boq create dev
 
-# Attach shell (exit to detach, container keeps running)
+# Re-enter existing boq
 boq enter dev
 
 # See what changed
@@ -58,7 +73,7 @@ boq destroy dev
 
 | Command | Description |
 |---------|-------------|
-| `create <name>` | Create a new boq and start container |
+| `create <name>` | Create a new boq and enter it (use `--no-enter` to skip) |
 | `enter [name]` | Attach shell to boq (starts if not running) |
 | `run <name> <cmd>` | Run a command in boq (must be running) |
 | `stop [name]` | Stop a running boq |
@@ -95,7 +110,7 @@ TOML-based configuration with 3-tier override system:
 
 1. **defaults.toml** (shipped with package) - base defaults
 2. **~/.boq/config.toml** (user global) - override defaults
-3. **~/.boq/\<name\>/config.toml** (per-boq) - override for specific boq
+3. **~/.boq/`<name>`/config.toml** (per-boq) - override for specific boq
 
 Higher priority overrides lower. Lists append by default (use `<key>_replace` to fully replace).
 
@@ -163,7 +178,7 @@ Environment variable expansion (`$HOME`, `$USER`, etc.) is supported in all stri
 
 ## How It Works
 
-- `create` sets up overlays and starts container (keeps running)
+- `create` sets up overlays, starts container, and enters shell (use `--no-enter` to skip)
 - `enter` attaches a shell; exiting detaches but container stays running
 - `run` executes a single command (container must be running)
 - `stop` explicitly stops container and unmounts overlays
@@ -198,20 +213,6 @@ Multiple directories are overlayed (copy-on-write) using kernel overlayfs. Chang
 **Cause:** systemd-resolved uses a stub resolver at 127.0.0.53 which doesn't work inside the container.
 
 **Solution:** This tool mounts `/run/systemd/resolve/resolv.conf` (with actual upstream DNS servers) as `/etc/resolv.conf`. If your system uses a different DNS setup, override `dns_resolv` in config.
-
-### Files under /mnt not visible
-
-**Error:** "No such file or directory" for files under `/mnt/...`
-
-**Cause:** `/mnt` often contains nested mount points that overlayfs cannot see through.
-
-**Solution:** Add `/mnt` to direct mounts in your config:
-
-```toml
-# ~/.boq/config.toml
-[mounts]
-direct = ["/mnt"]
-```
 
 ## Design Notes
 
