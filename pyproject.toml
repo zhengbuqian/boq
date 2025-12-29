@@ -1,0 +1,41 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "boq"
+version = "0.0.1"
+description = "Universal isolated development environment using kernel overlayfs"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.11"
+keywords = ["sandbox", "container", "podman", "overlayfs", "development"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Software Development",
+    "Topic :: System :: Systems Administration",
+]
+
+[project.scripts]
+boq = "boq.cli:main"
+
+[tool.hatch.build.targets.sdist]
+include = [
+    "/src",
+    "/README.md",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/boq"]
+
+[tool.hatch.build]
+include = [
+    "src/boq/*.py",
+    "src/boq/*.toml",
+]

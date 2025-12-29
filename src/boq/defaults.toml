@@ -1,0 +1,136 @@
+# defaults.toml - boq default configurations
+# May be overridden by:
+#   User config: ~/.boq/config.toml
+#   Per instance config: ~/.boq/<name>/config.toml
+#
+# Override rules:
+#   - Scalar values: higher priority overrides lower
+#   - Dicts: deep merge (recursive)
+#   - Lists: higher priority appends to lower (use `<key>_replace` to fully replace)
+
+[container]
+# Base container image (should match host OS for compatibility)
+image = "ubuntu:22.04"
+
+# Default shell to launch when entering boq
+shell = "/bin/bash"
+
+# Linux capabilities to grant the container
+# SYS_PTRACE: allows debugging tools like strace, gdb
+capabilities = ["SYS_PTRACE"]
+
+[container.env]
+# Environment variables passed to the container
+# Values starting with $ are expanded from host environment
+
+# Terminal type for proper color and cursor support
+TERM = "xterm-256color"
+
+# X11 display for GUI applications
+DISPLAY = "$DISPLAY"
+
+# Wayland display for native Wayland apps
+WAYLAND_DISPLAY = "$WAYLAND_DISPLAY"
+
+# XDG runtime directory (contains user sockets like Wayland, PulseAudio)
+XDG_RUNTIME_DIR = "$XDG_RUNTIME_DIR"
+
+# D-Bus session bus for desktop integration
+DBUS_SESSION_BUS_ADDRESS = "$DBUS_SESSION_BUS_ADDRESS"
+
+# SSH agent socket for key forwarding
+SSH_AUTH_SOCK = "$SSH_AUTH_SOCK"
+
+# PulseAudio server for audio support
+PULSE_SERVER = "$PULSE_SERVER"
+
+[overlays]
+# Directories isolated with copy-on-write using kernel overlayfs
+# Format: "source_path" = "overlay_name"
+# Changes are stored in ~/.boq/<name>/<overlay_name>/upper/
+
+# User home directory (isolated per boq instance)
+"$HOME" = "home"
+
+# System binaries and libraries (allows installing packages without affecting host)
+"/usr" = "usr"
+
+# Optional software directory
+"/opt" = "opt"
+
+# Homebrew on Linux (if installed)
+"/home/linuxbrew" = "linuxbrew"
+
+[passthrough]
+# Paths that bypass overlay and share directly with host
+# Changes here persist even after boq instance is destroyed
+# Must be full paths (supports $HOME, $USER variable expansion)
+paths = [
+    # Shell history (shared across all boq instances)
+    "$HOME/.zsh_history",
+    "$HOME/.bash_history",
+
+    # AI assistant configs
+    "$HOME/.claude",
+    "$HOME/.gemini",
+    "$HOME/.codex",
+    "$HOME/.factory",
+]
+
+[mounts]
+# Read-only bind mounts from host (not overlayed)
+# These are essential system directories that should not be modified
+readonly = [
+    "/bin",      # Essential command binaries
+    "/lib",      # Essential shared libraries
+    "/lib64",    # 64-bit shared libraries
+    "/lib32",    # 32-bit shared libraries (if exists)
+    "/sbin",     # Essential system binaries
+]
+
+# Direct read-write mounts (bypass overlay)
+# Used for directories with nested mount points that overlayfs cannot see through
+direct = []
+
+# Files from /etc to mount into container
+# These provide system configuration needed for tools to work correctly
+etc_files = [
+    # User/group info
+    "passwd",          # User account info (for uid/username mapping)
+    "group",           # Group info (for gid/groupname mapping)
+    "shadow",          # Password hashes (for su/sudo)
+    "gshadow",         # Group password hashes
+
+    # Network
+    "hostname",        # System hostname
+    "hosts",           # Static hostname resolution
+
+    # Locale and timezone
+    "localtime",       # Timezone data (binary)
+    "timezone",        # Timezone name
+    "locale.conf",     # Locale settings
+
+    # SSL/TLS certificates
+    "ssl",             # SSL certificates directory
+    "ca-certificates", # CA certificates for HTTPS
+
+    # Dynamic linker
+    "ld.so.cache",     # Shared library cache
+    "ld.so.conf",      # Shared library config
+    "ld.so.conf.d",    # Shared library config directory
+
+    # Shell configuration
+    "bash.bashrc",     # System-wide bash config
+    "profile",         # System-wide shell profile
+    "profile.d",       # Shell profile scripts directory
+    "inputrc",         # Readline configuration
+
+    # Misc
+    "alternatives",    # Debian alternatives system
+    "fonts",           # System fonts directory
+    "machine-id",      # Unique machine identifier (for D-Bus)
+]
+
+# DNS resolver configuration file
+# On systemd-resolved systems, use the real upstream servers, not the stub resolver
+dns_resolv = "/run/systemd/resolve/resolv.conf"
