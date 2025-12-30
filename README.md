@@ -45,6 +45,23 @@ cd boq
 uv pip install -e .               # Editable install
 ```
 
+Optionally, add the following to your `~/.bashrc` or `~/.zshrc` to get auto completion and auto yolo mode:
+
+```bash
+if [ -z "$BOQ_NAME" ]; then
+    # add auto completion only in host.
+    eval "$(boq completion -s zsh)"
+else
+    echo "In boq env, use yolo mode by default for AI cli tools."
+    alias claude="claude --dangerously-skip-permissions"
+    alias codex="codex --dangerously-bypass-approvals-and-sandbox"
+    alias gemini="gemini --yolo"
+fi
+
+# I personally also use this to know where am I, in host or in some boq.
+PROMPT="[%m] ${PROMPT}"
+```
+
 **Note:** Requires sudo for mounting kernel overlayfs.
 
 ## Quick Start
