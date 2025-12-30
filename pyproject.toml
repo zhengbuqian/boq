@@ -4,8 +4,8 @@ build-backend = "hatchling.build"
 
 [project]
 name = "boq"
-version = "0.0.1"
-description = "Universal isolated development environment using kernel overlayfs"
+version = "0.0.2"
+description = "Safe YOLO with AI code tools: universal isolated development environment using kernel overlayfs"
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.11"
