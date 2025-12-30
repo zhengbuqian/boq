@@ -130,7 +130,3 @@ etc_files = [
     "fonts",           # System fonts directory
     "machine-id",      # Unique machine identifier (for D-Bus)
 ]
-
-# DNS resolver configuration file
-# On systemd-resolved systems, use the real upstream servers, not the stub resolver
-dns_resolv = "/run/systemd/resolve/resolv.conf"

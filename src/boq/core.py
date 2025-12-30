@@ -121,6 +121,52 @@ class Boq:
         (base / "work").mkdir(parents=True, exist_ok=True)
         (base / "merged").mkdir(parents=True, exist_ok=True)
 
+    def _find_dns_resolv(self) -> str | None:
+        """Find the best DNS resolver config file.
+
+        Priority:
+        1. User-specified in config (dns_resolv)
+        2. systemd-resolved real config (not stub)
+        3. /etc/resolv.conf fallback
+        """
+        # Check if user specified a path
+        user_dns = self.config.dns_resolv
+        if user_dns and Path(user_dns).exists():
+            return user_dns
+
+        # Try systemd-resolved (use real upstream, not stub resolver)
+        systemd_resolv = Path("/run/systemd/resolve/resolv.conf")
+        if systemd_resolv.exists():
+            return str(systemd_resolv)
+
+        # Fallback to /etc/resolv.conf
+        if Path("/etc/resolv.conf").exists():
+            return "/etc/resolv.conf"
+
+        return None
+
+    # System directories that may be symlinks to /usr on merged-/usr distros
+    _MERGED_USR_CANDIDATES = frozenset({"/bin", "/sbin", "/lib", "/lib64", "/lib32"})
+
+    def _is_merged_usr_symlink(self, path: str) -> bool:
+        """Check if path is a system directory symlinked into /usr.
+
+        On merged-/usr distros (Fedora, Arch, etc.), /bin -> /usr/bin, etc.
+        We skip mounting these since /usr is already overlayed.
+
+        Only checks known system directories to avoid affecting user-configured paths.
+        """
+        if path not in self._MERGED_USR_CANDIDATES:
+            return False
+        p = Path(path)
+        if not p.is_symlink():
+            return False
+        try:
+            target = str(p.resolve())
+            return target.startswith("/usr/")
+        except (OSError, ValueError):
+            return False
+
     def build_volumes(self) -> list[str]:
         """Build volume mount arguments for podman."""
         volumes = []
@@ -139,8 +185,11 @@ class Boq:
             if Path(path).exists():
                 volumes.extend(["-v", f"{path}:{path}"])
 
-        # Read-only mounts
+        # Read-only mounts (skip symlinks to /usr on merged-usr distros)
         for path in self.config.readonly_mounts:
+            if self._is_merged_usr_symlink(path):
+                # Skip: this is a symlink to /usr which is already overlayed
+                continue
             if Path(path).exists():
                 volumes.extend(["-v", f"{path}:{path}:ro"])
 
@@ -150,12 +199,10 @@ class Boq:
             if etc_path.exists():
                 volumes.extend(["-v", f"{etc_path}:{etc_path}:ro"])
 
-        # DNS resolver
-        dns_resolv = Path(self.config.dns_resolv)
-        if dns_resolv.exists():
+        # DNS resolver (auto-detect or use config override)
+        dns_resolv = self._find_dns_resolv()
+        if dns_resolv:
             volumes.extend(["-v", f"{dns_resolv}:/etc/resolv.conf:ro"])
-        elif Path("/etc/resolv.conf").exists():
-            volumes.extend(["-v", "/etc/resolv.conf:/etc/resolv.conf:ro"])
 
         # /var/cache (some tools need)
         if Path("/var/cache").is_dir():

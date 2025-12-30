@@ -295,9 +295,18 @@ Overlay each mounted drive separately:
 
 **Error:** "Temporary failure in name resolution"
 
-**Cause:** systemd-resolved uses a stub resolver at 127.0.0.53 which doesn't work inside the container.
+**Cause:** systemd-resolved uses a stub resolver at an address that doesn't work inside the container.
 
-**Solution:** This tool mounts `/run/systemd/resolve/resolv.conf` (with actual upstream DNS servers) as `/etc/resolv.conf`. If your system uses a different DNS setup, override `dns_resolv` in config.
+**Solution:** boq auto-detects your DNS configuration:
+1. If systemd-resolved is in use, it mounts `/run/systemd/resolve/resolv.conf` (with actual upstream DNS servers)
+2. Otherwise, it falls back to `/etc/resolv.conf`
+
+If auto-detection doesn't work for your system, override `dns_resolv` in config:
+
+```toml
+[mounts]
+dns_resolv = "/path/to/your/resolv.conf"
+```
 
 ## Design Notes
 
