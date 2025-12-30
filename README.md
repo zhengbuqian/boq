@@ -177,6 +177,7 @@ capabilities = ["SYS_PTRACE"]
 "/home/linuxbrew" = "linuxbrew"
 
 [passthrough]
+# sharing shell history and AI cli tools config/history bewteen boq and host by default
 paths = [
     "$HOME/.zsh_history",
     "$HOME/.bash_history",
@@ -222,6 +223,73 @@ Multiple directories are overlayed (copy-on-write) using kernel overlayfs. Chang
 - Stop the boq first, update on host, then re-enter
 
 ## Troubleshooting
+
+### Symlinks to external/mounted drives don't work
+
+**Symptom:** You have a symlink like `~/.ccache -> /mnt/nvme1n1p1/.ccache`, but inside boq the symlink is broken:
+
+```bash
+$ ls -la ~/.ccache
+lrwxrwxrwx 1 user user 22 Feb 21 2024 .ccache -> /mnt/nvme1n1p1/.ccache
+$ ls ~/.ccache/
+ls: cannot access '/home/user/.ccache/': No such file or directory
+```
+
+**Cause:** By default, `/mnt` (or other mount points for external drives) is not mounted inside boq. The symlink exists in the `$HOME` overlay, but its target doesn't exist.
+
+**Solutions:** There are three approaches, each with different trade-offs:
+
+#### Solution 1: Direct mount (shared read-write)
+
+Mount the entire parent directory directly:
+
+```toml
+[mounts]
+direct = ["/mnt"]
+```
+
+- Symlink resolves correctly (`~/.ccache` → `/mnt/nvme1n1p1/.ccache`)
+- **Read-write**: changes in boq are immediately visible on host
+- **Use case**: You want to share build cache between host and boq (e.g., ccache, pip cache)
+
+#### Solution 2: Passthrough the symlink target (shared read-write)
+
+Add the symlink path to passthrough:
+
+```toml
+[passthrough]
+paths = ["$HOME/.ccache"]
+```
+
+- `~/.ccache` becomes accessible (podman resolves the symlink and mounts the target directly)
+- **Note**: Inside boq, `~/.ccache` appears as a directory, not a symlink
+- **Read-write**: changes in boq are immediately visible on host
+- **Use case**: You only need one specific path shared, not the entire `/mnt`
+
+#### Solution 3: Overlay individual mount points (isolated copy-on-write)
+
+Overlay each mounted drive separately:
+
+```toml
+[overlays]
+"/mnt/nvme1n1p1" = "nvme1n1p1"
+"/mnt/nvme2n1p1" = "nvme2n1p1"
+```
+
+- Symlink resolves correctly (`~/.ccache` → `/mnt/nvme1n1p1/.ccache`)
+- **Copy-on-write**: changes in boq are isolated, host doesn't see them
+- Changes stored in `~/.boq/<name>/nvme1n1p1/upper/`
+- **Use case**: You want to experiment with cached data without affecting host cache
+
+> **Important:** You cannot overlay `/mnt` directly if it contains nested mount points (e.g., `/mnt/nvme1n1p1`, `/mnt/nvme2n1p1`). Overlayfs cannot see through mount points - you'll only see empty directories. You must overlay each mount point individually.
+
+#### Summary
+
+| Solution | Access via symlink | Host sees changes | Use case |
+|----------|-------------------|-------------------|----------|
+| `direct = ["/mnt"]` | ✅ | ✅ Yes | Share cache with host |
+| `passthrough = ["$HOME/.ccache"]` | ✅ (as directory) | ✅ Yes | Share specific path only |
+| `overlays` per mount point | ✅ | ❌ No (isolated) | Experiment without affecting host |
 
 ### DNS resolution fails inside container
 
