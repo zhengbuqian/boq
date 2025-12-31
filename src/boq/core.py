@@ -124,16 +124,10 @@ class Boq:
     def _find_dns_resolv(self) -> str | None:
         """Find the best DNS resolver config file.
 
-        Priority:
-        1. User-specified in config (dns_resolv)
-        2. systemd-resolved real config (not stub)
-        3. /etc/resolv.conf fallback
+        Auto-detects the best DNS config:
+        1. systemd-resolved real config (not stub)
+        2. /etc/resolv.conf fallback
         """
-        # Check if user specified a path
-        user_dns = self.config.dns_resolv
-        if user_dns and Path(user_dns).exists():
-            return user_dns
-
         # Try systemd-resolved (use real upstream, not stub resolver)
         systemd_resolv = Path("/run/systemd/resolve/resolv.conf")
         if systemd_resolv.exists():
@@ -199,10 +193,22 @@ class Boq:
             if etc_path.exists():
                 volumes.extend(["-v", f"{etc_path}:{etc_path}:ro"])
 
-        # DNS resolver (auto-detect or use config override)
-        dns_resolv = self._find_dns_resolv()
-        if dns_resolv:
-            volumes.extend(["-v", f"{dns_resolv}:/etc/resolv.conf:ro"])
+        # Custom mounts (src -> dest mapping)
+        custom_dests = set()
+        for mount in self.config.custom_mounts:
+            src = mount.get("src", "")
+            dest = mount.get("dest", "")
+            mode = mount.get("mode", "ro")
+            if src and dest and Path(src).exists():
+                mode_suffix = ":ro" if mode == "ro" else ""
+                volumes.extend(["-v", f"{src}:{dest}{mode_suffix}"])
+                custom_dests.add(dest)
+
+        # DNS resolver (auto-detect if not overridden by custom mount)
+        if "/etc/resolv.conf" not in custom_dests:
+            dns_resolv = self._find_dns_resolv()
+            if dns_resolv:
+                volumes.extend(["-v", f"{dns_resolv}:/etc/resolv.conf:ro"])
 
         # /var/cache (some tools need)
         if Path("/var/cache").is_dir():
@@ -273,6 +279,28 @@ class Boq:
         for cap in capabilities:
             cap_add.extend(["--cap-add", cap])
 
+        # Build optional container arguments
+        optional_args = []
+
+        # Network mode (host, bridge, none, slirp4netns, etc.)
+        network = self.config.get("container.network")
+        if network:
+            optional_args.extend(["--network", network])
+
+        # IPC namespace (host, private, shareable)
+        ipc = self.config.get("container.ipc")
+        if ipc:
+            optional_args.extend(["--ipc", ipc])
+
+        # Device mappings (for GPU, etc.)
+        devices = self.config.get("container.devices", [])
+        for device in devices:
+            optional_args.extend(["--device", device])
+
+        # Extra arbitrary podman arguments
+        extra_args = self.config.get("container.extra_args", [])
+        optional_args.extend(extra_args)
+
         cmd = [
             "podman", "run", "-d",
             "--name", self.container_name,
@@ -284,7 +312,7 @@ class Boq:
             "--mount", "type=tmpfs,dst=/var/tmp,tmpfs-mode=1777",
             "--cap-drop", "ALL",
             "--cap-add", "CHOWN,DAC_OVERRIDE,FOWNER,FSETID,SETGID,SETUID,NET_BIND_SERVICE",
-        ] + cap_add + [
+        ] + cap_add + optional_args + [
             "--security-opt", "no-new-privileges",
             "--pids-limit", "4096",
         ] + env_args + [

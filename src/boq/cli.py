@@ -314,6 +314,12 @@ def cmd_status(args: argparse.Namespace) -> int:
     for path in boq.config.direct_mounts:
         print(f"    {path}: {Colors.YELLOW}direct mount (has nested mounts){Colors.NC}")
 
+    for mount in boq.config.custom_mounts:
+        src = mount.get("src", "")
+        dest = mount.get("dest", "")
+        mode = mount.get("mode", "ro")
+        print(f"    {src} -> {dest}: {Colors.YELLOW}custom mount ({mode}){Colors.NC}")
+
     if status["running"]:
         print(f"  Container: {Colors.GREEN}running{Colors.NC}")
     else:

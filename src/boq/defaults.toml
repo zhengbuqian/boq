@@ -19,6 +19,24 @@ shell = "/bin/bash"
 # SYS_PTRACE: allows debugging tools like strace, gdb
 capabilities = ["SYS_PTRACE"]
 
+# Network mode (optional, uncomment to use)
+# Options: "host" (share host network), "bridge" (default), "none", "slirp4netns"
+# Use "host" to access services running on the host via localhost
+# network = "host"
+
+# IPC namespace (optional)
+# Options: "host" (share host IPC), "private" (default), "shareable"
+# Use "host" for shared memory communication with host processes
+# ipc = "host"
+
+# Device mappings (optional)
+# Map host devices into the container (e.g., GPU, USB devices)
+# devices = ["/dev/dri", "/dev/nvidia0", "/dev/nvidiactl", "/dev/nvidia-uvm"]
+
+# Extra podman arguments (optional)
+# For advanced use cases not covered by other options
+# extra_args = ["--shm-size=2g", "--ulimit", "nofile=65535:65535"]
+
 [container.env]
 # Environment variables passed to the container
 # Values starting with $ are expanded from host environment
@@ -91,6 +109,15 @@ readonly = [
 # Direct read-write mounts (bypass overlay)
 # Used for directories with nested mount points that overlayfs cannot see through
 direct = []
+
+# Custom mounts with source -> destination mapping
+# Each entry specifies: src (host path), dest (container path), mode ("ro" or "rw")
+# Use this for mounting a file/directory to a different location in the container
+# Example: mount a custom resolv.conf to /etc/resolv.conf
+# custom = [
+#     { src = "/path/on/host", dest = "/path/in/container", mode = "ro" },
+# ]
+custom = []
 
 # Files from /etc to mount into container
 # These provide system configuration needed for tools to work correctly

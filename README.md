@@ -40,7 +40,7 @@ uv tool install boq       # Alternative: using uv
 pip install boq           # Or: install to current environment
 
 # For development
-git clone <repo>
+git clone https://github.com/zhengbuqian/boq.git
 cd boq
 uv pip install -e .               # Editable install
 ```
@@ -160,6 +160,13 @@ paths_replace = [
     "$HOME/.zsh_history",
     "$HOME/.claude",
 ]
+
+[mounts]
+# Custom mounts: mount a file/directory to a different location in the container
+# Each entry specifies: src (host path), dest (container path), mode ("ro" or "rw")
+custom = [
+    { src = "/path/on/host", dest = "/path/in/container", mode = "ro" },
+]
 ```
 
 ### Default Configuration
@@ -190,6 +197,7 @@ paths = [
 [mounts]
 readonly = ["/bin", "/lib", "/lib64", "/lib32", "/sbin"]
 direct = []
+custom = []
 ```
 
 Environment variable expansion (`$HOME`, `$USER`, etc.) is supported in all string values.
@@ -301,12 +309,64 @@ Overlay each mounted drive separately:
 1. If systemd-resolved is in use, it mounts `/run/systemd/resolve/resolv.conf` (with actual upstream DNS servers)
 2. Otherwise, it falls back to `/etc/resolv.conf`
 
-If auto-detection doesn't work for your system, override `dns_resolv` in config:
+If auto-detection doesn't work for your system, use a custom mount to override:
 
 ```toml
 [mounts]
-dns_resolv = "/path/to/your/resolv.conf"
+custom = [
+    { src = "/path/to/your/resolv.conf", dest = "/etc/resolv.conf", mode = "ro" },
+]
 ```
+
+### Using VS Code / Cursor / Antigravity / Windsurf and more with boq
+
+Since boq isolates files via overlayfs, editors on the host can't directly see changes made inside boq. Here are three approaches:
+
+#### Option 1: Attach editor to the container (Recommended)
+
+Use the **Dev Containers** extension to attach to the running boq container:
+
+1. Install "Dev Containers" extension
+2. `Ctrl+Shift+P` → "Dev Containers: Attach to Running Container..."
+3. Select `boq-<name>`
+
+You get full editor experience inside the container with all your build cache and intermediate results. Changes stay isolated.
+
+> **Note:** You may need to temporarily set the Docker path to `podman` in Dev Containers settings.
+
+#### Option 2: Use git worktree with passthrough
+
+Create a separate working copy that's shared between host and boq:
+
+```bash
+# On host
+git worktree add ../my-project-boq feature-branch
+```
+
+```toml
+# ~/.boq/config.toml
+[passthrough]
+paths = ["$HOME/projects/my-project-boq"]
+```
+
+Edit on host, build inside boq. Multiple boqs can work on different worktrees without interference. Downside: no shared build cache—each worktree builds from scratch.
+
+#### Option 3: Make project directory passthrough
+
+```toml
+[passthrough]
+paths = ["$HOME/projects/my-project"]
+```
+
+Simplest setup—edit on host, run in boq. But only one boq can safely work on this project at a time (changes are shared).
+
+#### Summary
+
+| Approach | Build cache | Multiple boqs | Edit from host |
+|----------|-------------|---------------|----------------|
+| Dev Containers | ✅ Yes | ✅ Yes | ❌ No (edit in container) |
+| Git worktree + passthrough | ❌ No | ✅ Yes | ✅ Yes |
+| Project passthrough | ✅ Yes | ❌ No (conflicts) | ✅ Yes |
 
 ## Design Notes
 

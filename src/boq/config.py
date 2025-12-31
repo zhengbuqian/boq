@@ -172,14 +172,20 @@ class Config:
         return self.mounts.get("direct", [])
 
     @property
+    def custom_mounts(self) -> list[dict]:
+        """Custom mounts with src -> dest mapping.
+
+        Each item is a dict with:
+          - src: source path on host
+          - dest: destination path in container
+          - mode: "ro" (read-only) or "rw" (read-write), defaults to "ro"
+        """
+        return self.mounts.get("custom", [])
+
+    @property
     def etc_files(self) -> list[str]:
         """Files from /etc to mount."""
         return self.mounts.get("etc_files", [])
-
-    @property
-    def dns_resolv(self) -> str:
-        """DNS resolver config file path."""
-        return self.mounts.get("dns_resolv", "/etc/resolv.conf")
 
     def dump(self) -> dict:
         """Return the full merged configuration."""
