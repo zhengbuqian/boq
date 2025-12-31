@@ -52,7 +52,7 @@ if [ -z "$BOQ_NAME" ]; then
     # add auto completion only in host.
     eval "$(boq completion -s zsh)"
 else
-    echo "In boq env, use yolo mode by default for AI cli tools."
+    echo "In boq env, using yolo mode by default for AI cli tools."
     alias claude="claude --dangerously-skip-permissions"
     alias codex="codex --dangerously-bypass-approvals-and-sandbox"
     alias gemini="gemini --yolo"

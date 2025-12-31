@@ -8,7 +8,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from .core import Boq, BoqError, list_boqs, check_dependencies, run_cmd
+from .core import Boq, BoqError, BoqDestroyed, LockTimeout, list_boqs, check_dependencies, run_cmd
 
 
 # ANSI colors
@@ -52,17 +52,20 @@ def cmd_create(args: argparse.Namespace) -> int:
     boq = Boq(args.name)
 
     try:
-        log_info("Mounting overlays...")
-        boq.create()
-        log_ok(f"Created boq: {args.name}")
-        log_info(f"Location: {boq.boq_dir}")
-
+        log_info("Creating boq...")
         if args.enter:
+            log_info(f"Location: {boq.boq_dir}")
             log_info(f"Entering boq '{args.name}'...")
-            return boq.enter()
+            return boq.create(enter=True)
         else:
+            boq.create(enter=False)
+            log_ok(f"Created boq: {args.name}")
+            log_info(f"Location: {boq.boq_dir}")
             log_info("Container is running. Use 'enter' to attach a shell.")
             return 0
+    except LockTimeout as e:
+        log_error(str(e))
+        return 1
     except BoqError as e:
         log_error(str(e))
         return 1
@@ -86,6 +89,12 @@ def cmd_enter(args: argparse.Namespace) -> int:
             log_info(f"Attaching to boq '{args.name}'...")
 
         return boq.enter()
+    except BoqDestroyed as e:
+        log_error(f"Boq '{args.name}' was destroyed while waiting")
+        return 1
+    except LockTimeout as e:
+        log_error(str(e))
+        return 1
     except BoqError as e:
         log_error(str(e))
         return 1
@@ -102,6 +111,12 @@ def cmd_run(args: argparse.Namespace) -> int:
 
     try:
         return boq.run(args.command)
+    except BoqDestroyed as e:
+        log_error(f"Boq '{args.name}' was destroyed while waiting")
+        return 1
+    except LockTimeout as e:
+        log_error(str(e))
+        return 1
     except BoqError as e:
         log_error(str(e))
         return 1
@@ -112,12 +127,18 @@ def cmd_stop(args: argparse.Namespace) -> int:
     boq = Boq(args.name)
 
     try:
+        log_info(f"Stopping boq '{args.name}'...")
+        log_info("(waiting for active sessions to finish...)")
         was_running = boq.stop()
         if was_running:
             log_ok(f"Stopped boq: {args.name}")
         else:
             log_info(f"Boq '{args.name}' was not running")
         return 0
+    except LockTimeout as e:
+        log_error(str(e))
+        log_info("Hint: exit shells in other terminals, or use Ctrl+C to cancel")
+        return 1
     except BoqError as e:
         log_error(str(e))
         return 1
@@ -128,9 +149,16 @@ def cmd_destroy(args: argparse.Namespace) -> int:
     boq = Boq(args.name)
 
     try:
+        log_info(f"Destroying boq '{args.name}'...")
+        if args.force_stop:
+            log_info("(waiting for active sessions to finish...)")
         boq.destroy(force_stop=args.force_stop)
         log_ok(f"Destroyed boq: {args.name}")
         return 0
+    except LockTimeout as e:
+        log_error(str(e))
+        log_info("Hint: exit shells in other terminals, or use Ctrl+C to cancel")
+        return 1
     except BoqError as e:
         log_error(str(e))
         if "still running" in str(e):

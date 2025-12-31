@@ -2,11 +2,14 @@
 Core boq operations: overlay mounting, container management.
 """
 
+import fcntl
 import os
 import re
 import shlex
 import subprocess
 import shutil
+import time
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Iterator
 
@@ -16,6 +19,113 @@ from .config import Config
 class BoqError(Exception):
     """Boq operation error."""
     pass
+
+
+class LockTimeout(BoqError):
+    """Lock acquisition timeout."""
+    pass
+
+
+class BoqDestroyed(BoqError):
+    """Boq was destroyed while waiting for lock."""
+    pass
+
+
+class BoqLock:
+    """File-based lock for serializing boq operations.
+
+    Uses fcntl.flock() for POSIX advisory locking.
+    Supports exclusive (write) and shared (read) locks with timeout.
+    """
+
+    def __init__(self, lock_file: Path, timeout: float = 30.0, check_destroyed: bool = False):
+        """
+        Args:
+            lock_file: Path to the lock file.
+            timeout: Lock acquisition timeout in seconds.
+            check_destroyed: If True, check st_nlink after acquiring lock to detect
+                if the boq was destroyed while waiting.
+        """
+        self.lock_file = lock_file
+        self.timeout = timeout
+        self.check_destroyed = check_destroyed
+        self._fd = None
+        self._lock_type = None
+
+    def _ensure_lock_dir(self):
+        """Ensure parent directory exists for lock file."""
+        self.lock_file.parent.mkdir(parents=True, exist_ok=True)
+
+    def _acquire(self, lock_type: int, lock_name: str):
+        """Acquire lock with timeout."""
+        self._ensure_lock_dir()
+        self._fd = open(self.lock_file, "w")
+
+        start = time.monotonic()
+        while True:
+            try:
+                fcntl.flock(self._fd, lock_type | fcntl.LOCK_NB)
+                self._lock_type = lock_type
+
+                # Check if lock file was deleted while we were waiting
+                # (indicates boq was destroyed)
+                if self.check_destroyed:
+                    stat = os.fstat(self._fd.fileno())
+                    if stat.st_nlink == 0:
+                        self._fd.close()
+                        self._fd = None
+                        self._lock_type = None
+                        raise BoqDestroyed(
+                            "Boq was destroyed while waiting for lock"
+                        )
+                return
+            except BlockingIOError:
+                elapsed = time.monotonic() - start
+                if elapsed > self.timeout:
+                    self._fd.close()
+                    self._fd = None
+                    raise LockTimeout(
+                        f"Timeout acquiring {lock_name} lock after {self.timeout:.0f}s: "
+                        f"another boq operation is in progress"
+                    )
+                time.sleep(0.1)
+
+    def _release(self):
+        """Release lock."""
+        if self._fd:
+            fcntl.flock(self._fd, fcntl.LOCK_UN)
+            self._fd.close()
+            self._fd = None
+            self._lock_type = None
+
+    def downgrade_to_shared(self):
+        """Atomically downgrade from exclusive to shared lock."""
+        if self._fd and self._lock_type == fcntl.LOCK_EX:
+            fcntl.flock(self._fd, fcntl.LOCK_SH)
+            self._lock_type = fcntl.LOCK_SH
+
+    @contextmanager
+    def exclusive(self):
+        """Context manager for exclusive lock."""
+        self._acquire(fcntl.LOCK_EX, "exclusive")
+        try:
+            yield self
+        finally:
+            self._release()
+
+    @contextmanager
+    def shared(self):
+        """Context manager for shared lock."""
+        self._acquire(fcntl.LOCK_SH, "shared")
+        try:
+            yield self
+        finally:
+            self._release()
+
+
+def get_global_lock(boq_root: Path, timeout: float = 30.0) -> BoqLock:
+    """Get global lock for cross-instance operations (e.g., create)."""
+    return BoqLock(boq_root / ".lock", timeout=timeout)
 
 
 def run_cmd(cmd: list[str], check: bool = True, capture: bool = False, **kwargs) -> subprocess.CompletedProcess:
@@ -68,13 +178,16 @@ def container_running(name: str) -> bool:
 class Boq:
     """Boq instance manager."""
 
-    def __init__(self, name: str, boq_root: Path | None = None):
+    def __init__(self, name: str, boq_root: Path | None = None, lock_timeout: float = 30.0):
         validate_name(name)
         self.name = name
         self.boq_root = boq_root or Path(os.environ.get("BOQ_ROOT", Path.home() / ".boq"))
         self.boq_dir = self.boq_root / name
         self.container_name = f"boq-{name}"
         self.config = Config(boq_root=self.boq_root, boq_name=name if self.exists() else None)
+        # Per-boq lock with check_destroyed=True to detect if boq was destroyed while waiting
+        self._lock = BoqLock(self.boq_dir / ".lock", timeout=lock_timeout, check_destroyed=True)
+        self._lock_timeout = lock_timeout
 
     def exists(self) -> bool:
         """Check if boq directory exists."""
@@ -365,53 +478,97 @@ class Boq:
 
         return was_running
 
-    def create(self) -> None:
-        """Create a new boq."""
-        if self.exists():
-            raise BoqError(f"Boq '{self.name}' already exists")
+    def create(self, enter: bool = True, workdir: str | None = None) -> int:
+        """Create a new boq.
 
-        # Reload config now that we know boq doesn't exist
-        self.config = Config(boq_root=self.boq_root)
+        Args:
+            enter: If True, enter the boq shell after creation.
+            workdir: Working directory for the shell.
 
-        # Create overlay directories
-        for _, overlay_name, _ in self.overlay_dirs():
-            self.create_overlay_dirs(overlay_name)
+        Returns:
+            Shell exit code if enter=True, otherwise 0.
+        """
+        # Step 1: Global lock to protect exists check + mkdir + per-boq lock acquisition
+        # This prevents destroy from intervening between mkdir and per-boq lock
+        global_lock = get_global_lock(self.boq_root, timeout=self._lock_timeout)
+        with global_lock.exclusive():
+            if self.exists():
+                raise BoqError(f"Boq '{self.name}' already exists")
 
-        # Mount overlays
-        self.mount_all_overlays()
+            # Create boq directory (makes per-boq lock available)
+            self.boq_dir.mkdir(parents=True, exist_ok=True)
 
-        # Start container
+            # Acquire per-boq lock while still holding global lock
+            # This closes the race window where destroy could intervene
+            self._lock._acquire(fcntl.LOCK_EX, "exclusive")
+        # Global lock released, but we still hold per-boq lock
+
+        # Step 2: Setup with per-boq exclusive lock (already acquired)
         try:
-            self.start_container()
-        except Exception:
-            # Clean up if start fails
-            self.unmount_all_overlays()
-            raise
+            # Reload config now that we know boq doesn't exist
+            self.config = Config(boq_root=self.boq_root)
+
+            # Create overlay directories
+            for _, overlay_name, _ in self.overlay_dirs():
+                self.create_overlay_dirs(overlay_name)
+
+            # Mount overlays
+            self.mount_all_overlays()
+
+            # Start container
+            try:
+                self.start_container()
+            except Exception:
+                # Clean up if start fails
+                self.unmount_all_overlays()
+                raise
+
+            # Step 3: If entering, downgrade to shared lock for shell
+            if enter:
+                self._lock.downgrade_to_shared()
+                return self._exec_shell(workdir)
+
+            return 0
+        finally:
+            # Always release per-boq lock when done
+            # (either exclusive after setup, or shared after shell exits)
+            self._lock._release()
 
     def enter(self, workdir: str | None = None) -> int:
-        """Enter the boq shell. Returns exit code."""
+        """Enter the boq shell. Returns exit code.
+
+        If container is already running, directly attach (shared lock).
+        If not running, start it first (exclusive lock, then downgrade to shared).
+        """
         if not self.exists():
             raise BoqError(f"Boq '{self.name}' not found")
 
-        # If running, just attach
+        # Fast path: container already running, just need shared lock for shell
         if self.is_running():
+            with self._lock.shared():
+                return self._exec_shell(workdir)
+
+        # Slow path: need to start container, acquire exclusive lock first
+        with self._lock.exclusive() as lock:
+            # Double-check after acquiring lock (another process might have started it)
+            if not self.is_running():
+                # Clean up stale container
+                if container_exists(self.container_name):
+                    run_cmd(["podman", "rm", "-f", self.container_name],
+                            check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+                # Create missing overlay directories (for newly added overlays)
+                for src_path, overlay_name, merged in self.overlay_dirs():
+                    if not merged.exists():
+                        self.create_overlay_dirs(overlay_name)
+
+                # Mount and start
+                self.mount_all_overlays()
+                self.start_container()
+
+            # Downgrade to shared lock for shell execution
+            lock.downgrade_to_shared()
             return self._exec_shell(workdir)
-
-        # Clean up stale container
-        if container_exists(self.container_name):
-            run_cmd(["podman", "rm", "-f", self.container_name],
-                    check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-
-        # Create missing overlay directories (for newly added overlays)
-        for src_path, overlay_name, merged in self.overlay_dirs():
-            if not merged.exists():
-                self.create_overlay_dirs(overlay_name)
-
-        # Mount and start
-        self.mount_all_overlays()
-        self.start_container()
-
-        return self._exec_shell(workdir)
 
     def _exec_shell(self, workdir: str | None = None) -> int:
         """Execute shell in container."""
@@ -435,7 +592,9 @@ class Boq:
     def run(self, command: str | list[str], workdir: str | None = None) -> int:
         """
         Run a command in the boq. Returns exit code.
-        
+
+        Uses shared lock to prevent stop/destroy during execution.
+
         Args:
             command: Command string or list of arguments.
             workdir: Working directory inside container.
@@ -443,57 +602,74 @@ class Boq:
         if not self.exists():
             raise BoqError(f"Boq '{self.name}' not found")
 
-        if not self.is_running():
-            raise BoqError(f"Boq '{self.name}' is not running")
+        # Acquire shared lock for the entire command execution
+        with self._lock.shared():
+            if not self.is_running():
+                raise BoqError(f"Boq '{self.name}' is not running")
 
-        shell = self.config.get("container.shell", "/bin/zsh")
-        wd = workdir or os.getcwd()
+            shell = self.config.get("container.shell", "/bin/zsh")
+            wd = workdir or os.getcwd()
 
-        # Check if workdir exists in container, fallback to $HOME
-        check = run_cmd(
-            ["podman", "exec", self.container_name, "test", "-d", wd],
-            check=False
-        )
-        if check.returncode != 0:
-            wd = os.environ.get("HOME", "/")
+            # Check if workdir exists in container, fallback to $HOME
+            check = run_cmd(
+                ["podman", "exec", self.container_name, "test", "-d", wd],
+                check=False
+            )
+            if check.returncode != 0:
+                wd = os.environ.get("HOME", "/")
 
-        # Prepare command string for shell execution
-        if isinstance(command, list):
-            cmd_str = shlex.join(command)
-        else:
-            cmd_str = command
+            # Prepare command string for shell execution
+            if isinstance(command, list):
+                cmd_str = shlex.join(command)
+            else:
+                cmd_str = command
 
-        result = run_cmd(
-            ["podman", "exec", "-w", wd, self.container_name, shell, "-c", cmd_str],
-            check=False
-        )
-        return result.returncode
+            result = run_cmd(
+                ["podman", "exec", "-w", wd, self.container_name, shell, "-c", cmd_str],
+                check=False
+            )
+            return result.returncode
 
     def stop(self) -> bool:
-        """Stop the boq. Returns True if was running."""
+        """Stop the boq. Returns True if was running.
+
+        Acquires exclusive lock, waiting for all active sessions (shells, run commands)
+        to finish before stopping.
+        """
         if not self.exists():
             raise BoqError(f"Boq '{self.name}' not found")
 
-        was_running = self.stop_container()
-        self.unmount_all_overlays()
-        return was_running
+        # Exclusive lock waits for all shared locks (active sessions) to release
+        with self._lock.exclusive():
+            was_running = self.stop_container()
+            self.unmount_all_overlays()
+            return was_running
 
     def destroy(self, force_stop: bool = False) -> None:
-        """Destroy the boq."""
+        """Destroy the boq.
+
+        Acquires exclusive lock, waiting for all active sessions to finish.
+        The rm -rf is done inside the lock so that any process waiting for the lock
+        will detect the deletion via st_nlink check when it acquires the lock.
+        """
         if not self.exists():
             raise BoqError(f"Boq '{self.name}' not found")
 
-        if self.is_running():
-            if not force_stop:
-                raise BoqError(f"Boq '{self.name}' is still running. Use --force-stop to stop and destroy.")
-            self.stop()
-        else:
-            # Clean up stale state
-            self.stop_container()
-            self.unmount_all_overlays()
+        # Exclusive lock waits for all shared locks (active sessions) to release
+        with self._lock.exclusive():
+            if self.is_running():
+                if not force_stop:
+                    raise BoqError(f"Boq '{self.name}' is still running. Use --force-stop to stop and destroy.")
+                self.stop_container()
+                self.unmount_all_overlays()
+            else:
+                # Clean up stale state
+                self.stop_container()
+                self.unmount_all_overlays()
 
-        # Remove boq directory (may contain root-owned files)
-        run_sudo(["rm", "-rf", str(self.boq_dir)])
+            # Remove boq directory inside lock (includes lock file itself)
+            # This ensures waiters detect deletion via st_nlink == 0
+            run_sudo(["rm", "-rf", str(self.boq_dir)])
 
     def get_status(self) -> dict:
         """Get boq status information."""
