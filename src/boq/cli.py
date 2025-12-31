@@ -390,7 +390,7 @@ _boq_completions() {
     cur="${COMP_WORDS[COMP_CWORD]}"
     prev="${COMP_WORDS[COMP_CWORD-1]}"
 
-    boq_root="${BOQ_ROOT:-$HOME/.boq}"
+    boq_root="$HOME/.boq"
 
     commands="create enter run stop destroy diff status list completion --help"
 

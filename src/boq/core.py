@@ -148,6 +148,41 @@ def validate_name(name: str) -> None:
         raise BoqError(f"Invalid boq name '{name}': must contain only alphanumeric characters, dashes, and underscores.")
 
 
+# Paths that must never be deleted
+_DANGEROUS_PATHS = frozenset({
+    "/", "/home", "/root", "/usr", "/var", "/etc", "/bin", "/sbin",
+    "/lib", "/lib64", "/lib32", "/opt", "/boot", "/dev", "/proc", "/sys", "/tmp"
+})
+
+
+def safe_rmtree(path: Path) -> None:
+    """Safely remove a boq directory with multiple safeguards.
+
+    Safeguards:
+    1. Path must be resolved (no symlinks or ..)
+    2. Path must contain '.boq' component
+    3. Path must have sufficient depth (>= 4 components)
+    4. Path must not be in dangerous paths blacklist
+    """
+    resolved = path.resolve()
+    resolved_str = str(resolved)
+
+    # 1. Must contain '.boq' in path
+    if "/.boq/" not in resolved_str and not resolved_str.endswith("/.boq"):
+        raise BoqError(f"Refusing to delete: {resolved} does not contain '.boq'")
+
+    # 2. Path depth check (e.g., /home/user/.boq/name = 5 parts)
+    if len(resolved.parts) < 4:
+        raise BoqError(f"Refusing to delete: path {resolved} is too shallow")
+
+    # 3. Blacklist check
+    if resolved_str in _DANGEROUS_PATHS or resolved_str.rstrip("/") in _DANGEROUS_PATHS:
+        raise BoqError(f"Refusing to delete dangerous path: {resolved}")
+
+    # All checks passed, safe to delete
+    run_sudo(["rm", "-rf", str(resolved)])
+
+
 def escape_mount_opt(path: str | Path) -> str:
     """Escape path for use in mount options."""
     return str(path).replace(",", "\\,")
@@ -178,13 +213,13 @@ def container_running(name: str) -> bool:
 class Boq:
     """Boq instance manager."""
 
-    def __init__(self, name: str, boq_root: Path | None = None, lock_timeout: float = 30.0):
+    def __init__(self, name: str, lock_timeout: float = 30.0):
         validate_name(name)
         self.name = name
-        self.boq_root = boq_root or Path(os.environ.get("BOQ_ROOT", Path.home() / ".boq"))
+        self.boq_root = Path.home() / ".boq"
         self.boq_dir = self.boq_root / name
         self.container_name = f"boq-{name}"
-        self.config = Config(boq_root=self.boq_root, boq_name=name if self.exists() else None)
+        self.config = Config(boq_name=name if self.exists() else None)
         # Per-boq lock with check_destroyed=True to detect if boq was destroyed while waiting
         self._lock = BoqLock(self.boq_dir / ".lock", timeout=lock_timeout, check_destroyed=True)
         self._lock_timeout = lock_timeout
@@ -506,7 +541,7 @@ class Boq:
         # Step 2: Setup with per-boq exclusive lock (already acquired)
         try:
             # Reload config now that we know boq doesn't exist
-            self.config = Config(boq_root=self.boq_root)
+            self.config = Config()
 
             # Create overlay directories
             for _, overlay_name, _ in self.overlay_dirs():
@@ -669,7 +704,7 @@ class Boq:
 
             # Remove boq directory inside lock (includes lock file itself)
             # This ensures waiters detect deletion via st_nlink == 0
-            run_sudo(["rm", "-rf", str(self.boq_dir)])
+            safe_rmtree(self.boq_dir)
 
     def get_status(self) -> dict:
         """Get boq status information."""
@@ -697,15 +732,15 @@ class Boq:
         return status
 
 
-def list_boqs(boq_root: Path | None = None) -> list[dict]:
+def list_boqs() -> list[dict]:
     """List all boq instances."""
-    root = boq_root or Path(os.environ.get("BOQ_ROOT", Path.home() / ".boq"))
+    root = Path.home() / ".boq"
 
     if not root.is_dir():
         return []
 
     boqs = []
-    config = Config(boq_root=root)
+    config = Config()
 
     for item in root.iterdir():
         if not item.is_dir():

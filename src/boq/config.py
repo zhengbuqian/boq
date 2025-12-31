@@ -93,8 +93,8 @@ def load_toml(path: Path) -> dict:
 class Config:
     """Boq configuration manager."""
 
-    def __init__(self, boq_root: Path | None = None, boq_name: str | None = None):
-        self.boq_root = boq_root or Path(os.environ.get("BOQ_ROOT", Path.home() / ".boq"))
+    def __init__(self, boq_name: str | None = None):
+        self.boq_root = Path.home() / ".boq"
         self.boq_name = boq_name
         self._config: dict = {}
         self._load()
