@@ -9,6 +9,7 @@ description = "Safe YOLO with AI code tools: universal isolated development envi
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.11"
+dependencies = []
 keywords = ["sandbox", "container", "podman", "overlayfs", "development"]
 classifiers = [
     "Development Status :: 4 - Beta",

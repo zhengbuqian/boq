@@ -10,7 +10,7 @@
 
 [container]
 # Base container image (should match host OS for compatibility)
-image = "ubuntu:22.04"
+image = "docker.io/library/ubuntu:22.04"
 
 # Default shell to launch when entering boq
 shell = "/bin/bash"

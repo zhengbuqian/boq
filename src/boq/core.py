@@ -3,6 +3,8 @@ Core boq operations: overlay mounting, container management.
 """
 
 import os
+import re
+import shlex
 import subprocess
 import shutil
 from pathlib import Path
@@ -28,6 +30,17 @@ def run_cmd(cmd: list[str], check: bool = True, capture: bool = False, **kwargs)
 def run_sudo(cmd: list[str], **kwargs) -> subprocess.CompletedProcess:
     """Run a command with sudo."""
     return run_cmd(["sudo"] + cmd, **kwargs)
+
+
+def validate_name(name: str) -> None:
+    """Validate boq name to prevent path traversal."""
+    if not re.match(r'^[a-zA-Z0-9_-]+$', name):
+        raise BoqError(f"Invalid boq name '{name}': must contain only alphanumeric characters, dashes, and underscores.")
+
+
+def escape_mount_opt(path: str | Path) -> str:
+    """Escape path for use in mount options."""
+    return str(path).replace(",", "\\,")
 
 
 def is_mountpoint(path: Path) -> bool:
@@ -56,6 +69,7 @@ class Boq:
     """Boq instance manager."""
 
     def __init__(self, name: str, boq_root: Path | None = None):
+        validate_name(name)
         self.name = name
         self.boq_root = boq_root or Path(os.environ.get("BOQ_ROOT", Path.home() / ".boq"))
         self.boq_dir = self.boq_root / name
@@ -92,9 +106,17 @@ class Boq:
         upper = self.boq_dir / overlay_name / "upper"
         work = self.boq_dir / overlay_name / "work"
 
+        # Escape paths for mount options
+        opts = (
+            f"lowerdir={escape_mount_opt(src_path)},"
+            f"upperdir={escape_mount_opt(upper)},"
+            f"workdir={escape_mount_opt(work)},"
+            "userxattr"
+        )
+
         run_sudo([
             "mount", "-t", "overlay", f"overlay-{overlay_name}",
-            "-o", f"lowerdir={src_path},upperdir={upper},workdir={work},userxattr",
+            "-o", opts,
             str(merged)
         ])
 
@@ -111,8 +133,18 @@ class Boq:
 
     def unmount_all_overlays(self) -> None:
         """Unmount all overlay directories."""
+        # First, try to unmount based on config
         for _, overlay_name, _ in self.overlay_dirs():
             self.unmount_overlay(overlay_name)
+        
+        # Second, safety net: check for any remaining mounts in boq_dir
+        # This handles cases where config changed or overlays were renamed
+        if self.boq_dir.exists():
+            for root, dirs, _ in os.walk(self.boq_dir, topdown=False):
+                for d in dirs:
+                    path = Path(root) / d
+                    if is_mountpoint(path):
+                        run_sudo(["umount", str(path)], check=False)
 
     def create_overlay_dirs(self, overlay_name: str) -> None:
         """Create overlay directory structure."""
@@ -254,7 +286,6 @@ class Boq:
         for key, value in self.config.container.get("env", {}).items():
             if isinstance(value, str) and "$" in value:
                 # Expand $VAR references from env_vars first, then os.environ
-                import re
                 def replace_var(match):
                     var_name = match.group(1)
                     return env_vars.get(var_name, os.environ.get(var_name, ""))
@@ -272,7 +303,7 @@ class Boq:
         """Start the container."""
         volumes = self.build_volumes()
         env_args = self.build_env_args()
-        image = self.config.get("container.image", "ubuntu:22.04")
+        image = self.config.get("container.image", "docker.io/library/ubuntu:22.04")
         capabilities = self.config.get("container.capabilities", ["SYS_PTRACE"])
 
         cap_add = []
@@ -316,7 +347,7 @@ class Boq:
             "--security-opt", "no-new-privileges",
             "--pids-limit", "4096",
         ] + env_args + [
-            f"docker.io/library/{image}",
+            image,
             "sleep", "infinity"
         ]
 
@@ -350,7 +381,12 @@ class Boq:
         self.mount_all_overlays()
 
         # Start container
-        self.start_container()
+        try:
+            self.start_container()
+        except Exception:
+            # Clean up if start fails
+            self.unmount_all_overlays()
+            raise
 
     def enter(self, workdir: str | None = None) -> int:
         """Enter the boq shell. Returns exit code."""
@@ -396,8 +432,14 @@ class Boq:
         )
         return result.returncode
 
-    def run(self, command: str, workdir: str | None = None) -> int:
-        """Run a command in the boq. Returns exit code."""
+    def run(self, command: str | list[str], workdir: str | None = None) -> int:
+        """
+        Run a command in the boq. Returns exit code.
+        
+        Args:
+            command: Command string or list of arguments.
+            workdir: Working directory inside container.
+        """
         if not self.exists():
             raise BoqError(f"Boq '{self.name}' not found")
 
@@ -415,8 +457,14 @@ class Boq:
         if check.returncode != 0:
             wd = os.environ.get("HOME", "/")
 
+        # Prepare command string for shell execution
+        if isinstance(command, list):
+            cmd_str = shlex.join(command)
+        else:
+            cmd_str = command
+
         result = run_cmd(
-            ["podman", "exec", "-w", wd, self.container_name, shell, "-c", command],
+            ["podman", "exec", "-w", wd, self.container_name, shell, "-c", cmd_str],
             check=False
         )
         return result.returncode
@@ -535,6 +583,7 @@ def list_boqs(boq_root: Path | None = None) -> list[dict]:
 def check_dependencies() -> list[str]:
     """Check for required dependencies. Returns list of missing deps."""
     missing = []
-    if shutil.which("podman") is None:
-        missing.append("podman")
+    for tool in ["podman", "mount", "umount", "rm", "git"]:
+        if shutil.which(tool) is None:
+            missing.append(tool)
     return missing

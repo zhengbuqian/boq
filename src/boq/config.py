@@ -19,15 +19,17 @@ from typing import Any
 def _expand_string(s: str, env: dict[str, str]) -> str:
     """Expand environment variables in a single string."""
     import re
-    # Expand ${VAR} format first
-    result = s
-    for key, val in env.items():
-        result = result.replace(f"${{{key}}}", val)
-    # Then $VAR format (only word characters after $)
+    
     def replace_var(match):
         var_name = match.group(1)
         return env.get(var_name, match.group(0))
+
+    # Expand ${VAR} format
+    result = re.sub(r'\$\{([A-Za-z_][A-Za-z0-9_]*)\}', replace_var, s)
+    
+    # Expand $VAR format (only word characters after $)
     result = re.sub(r'\$([A-Za-z_][A-Za-z0-9_]*)', replace_var, result)
+    
     return result
 
 

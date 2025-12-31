@@ -101,7 +101,7 @@ def cmd_run(args: argparse.Namespace) -> int:
         return 1
 
     try:
-        return boq.run(" ".join(args.command))
+        return boq.run(args.command)
     except BoqError as e:
         log_error(str(e))
         return 1
@@ -551,7 +551,11 @@ Examples:
         parser.print_help()
         return 1
 
-    return args.func(args)
+    try:
+        return args.func(args)
+    except KeyboardInterrupt:
+        print("\nInterrupted.")
+        return 130
 
 
 if __name__ == "__main__":
