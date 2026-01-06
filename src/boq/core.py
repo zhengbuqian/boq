@@ -6,6 +6,7 @@ import fcntl
 import os
 import re
 import shlex
+import socket
 import subprocess
 import shutil
 import time
@@ -14,6 +15,36 @@ from pathlib import Path
 from typing import Iterator
 
 from .config import Config
+
+
+def detect_inside_boq() -> tuple[bool, str]:
+    """Detect if currently running inside a boq container.
+
+    Uses multiple detection methods for reliability:
+    1. BOQ_NAME environment variable (set by boq)
+    2. Hostname prefix "boq-" (set by boq)
+    3. Podman container marker file /run/.containerenv
+
+    Returns:
+        Tuple of (is_inside_boq, detection_method).
+        detection_method is empty string if not inside boq.
+    """
+    # Method 1: BOQ_NAME environment variable (most reliable, boq-specific)
+    if os.environ.get("BOQ_NAME"):
+        return True, "BOQ_NAME environment variable"
+
+    # Method 2: Hostname prefix (boq-specific)
+    try:
+        if socket.gethostname().startswith("boq-"):
+            return True, "hostname prefix 'boq-'"
+    except OSError:
+        pass
+
+    # Method 3: Podman container marker file
+    if Path("/run/.containerenv").exists():
+        return True, "podman container marker /run/.containerenv"
+
+    return False, ""
 
 
 class BoqError(Exception):

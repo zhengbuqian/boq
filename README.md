@@ -56,6 +56,9 @@ else
     alias claude="claude --dangerously-skip-permissions"
     alias codex="codex --dangerously-bypass-approvals-and-sandbox"
     alias gemini="gemini --yolo"
+    # if you use zsh and see error like `zsh: can't rename ~/.zsh_history.new to $HISTFILE`,
+    # you can suppress this error by unsetting `HIST_SAVE_BY_COPY` option.
+    unsetopt HIST_SAVE_BY_COPY
 fi
 
 # I personally also use this to know where am I, in host or in some boq.

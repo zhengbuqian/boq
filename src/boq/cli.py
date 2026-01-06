@@ -8,7 +8,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from .core import Boq, BoqError, BoqDestroyed, LockTimeout, list_boqs, check_dependencies, run_cmd
+from .core import Boq, BoqError, BoqDestroyed, LockTimeout, list_boqs, check_dependencies, run_cmd, detect_inside_boq
 
 
 # ANSI colors
@@ -128,18 +128,21 @@ def cmd_stop(args: argparse.Namespace) -> int:
 
     try:
         log_info(f"Stopping boq '{args.name}'...")
-        log_info("(waiting for active sessions to finish...)")
+        print(f"{Colors.BLUE}[INFO]{Colors.NC} (waiting for active sessions to finish...)", end="", flush=True)
         was_running = boq.stop()
+        print(" Done, stopping container...")
         if was_running:
             log_ok(f"Stopped boq: {args.name}")
         else:
             log_info(f"Boq '{args.name}' was not running")
         return 0
     except LockTimeout as e:
+        print()  # newline after waiting message
         log_error(str(e))
         log_info("Hint: exit shells in other terminals, or use Ctrl+C to cancel")
         return 1
     except BoqError as e:
+        print()  # newline after waiting message
         log_error(str(e))
         return 1
 
@@ -151,15 +154,21 @@ def cmd_destroy(args: argparse.Namespace) -> int:
     try:
         log_info(f"Destroying boq '{args.name}'...")
         if args.force_stop:
-            log_info("(waiting for active sessions to finish...)")
+            print(f"{Colors.BLUE}[INFO]{Colors.NC} (waiting for active sessions to finish...)", end="", flush=True)
         boq.destroy(force_stop=args.force_stop)
+        if args.force_stop:
+            print(" Done, destroying container...")
         log_ok(f"Destroyed boq: {args.name}")
         return 0
     except LockTimeout as e:
+        if args.force_stop:
+            print()  # newline after waiting message
         log_error(str(e))
         log_info("Hint: exit shells in other terminals, or use Ctrl+C to cancel")
         return 1
     except BoqError as e:
+        if args.force_stop:
+            print()  # newline after waiting message
         log_error(str(e))
         if "still running" in str(e):
             print(f"Use --force-stop to stop and destroy: boq destroy {args.name} --force-stop")
@@ -495,6 +504,13 @@ def cmd_completion(args: argparse.Namespace) -> int:
 
 def main() -> int:
     """Main entry point."""
+    # Check if running inside a boq container
+    inside_boq, _ = detect_inside_boq()
+    if inside_boq:
+        log_error("Cannot run boq inside a boq container")
+        print("Hint: exit the current boq first, then run boq commands on the host.")
+        return 1
+
     # Check dependencies
     missing = check_dependencies()
     if missing:
