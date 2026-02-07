@@ -342,7 +342,22 @@ Use the **Dev Containers** extension to attach to the running boq container:
 
 You get full editor experience inside the container with all your build cache and intermediate results. Changes stay isolated.
 
-> **Note:** You may need to temporarily set the Docker path to `podman` in Dev Containers settings.
+> **Note (rootful vs rootless):**
+> - If your boq container is running with **rootful podman**, Dev Containers may not see it via plain `podman`.
+> - Create a wrapper command and point Dev Containers to it:
+>
+> ```bash
+> mkdir -p ~/.local/bin
+> cat > ~/.local/bin/sudopodman <<'EOF'
+> #!/usr/bin/env bash
+> exec sudo -n /usr/bin/podman "$@"
+> EOF
+> chmod +x ~/.local/bin/sudopodman
+> ```
+>
+> Then set **Dev > Containers: Docker Path** to `sudopodman`.
+>
+> If you're still using **rootless** containers, keep using `podman`.
 
 #### Option 2: Use git worktree with passthrough
 
