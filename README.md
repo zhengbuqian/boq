@@ -26,6 +26,12 @@ Isolated development environment using Linux kernel overlayfs.
 - Full file locking support (unlike fuse-overlayfs)
 - TOML-based configuration with 3-tier override system
 
+## Networking
+
+- In default bridge mode, each boq gets a static IP and a host alias `boq-<name>`.
+- From host, you can access services inside boq directly, for example: `curl http://boq-dev:8080`.
+- Legacy rootless running boqs do not provide this host-access alias; restart them with `boq stop <name>` then `boq enter <name>` to upgrade.
+
 ## Installation
 
 Requires Python 3.11+ and podman.
@@ -95,12 +101,12 @@ boq destroy dev
 |---------|-------------|
 | `create <name>` | Create a new boq and enter it (use `--no-enter` to skip) |
 | `enter [name]` | Attach shell to boq (starts if not running) |
-| `run <name> <cmd>` | Run a command in boq (must be running) |
-| `stop [name]` | Stop a running boq |
-| `destroy <name>` | Destroy a boq (stops if running) |
+| `run <name> <cmd>` | Run a command in boq (must be running; may be interrupted by `stop`/`destroy`) |
+| `stop [name]` | Stop a boq immediately (may interrupt active sessions) |
+| `destroy <name>` | Destroy a boq immediately (stops if running; may interrupt active sessions) |
 | `diff [name] [path]` | Show changes made in boq |
 | `status [name]` | Show boq status |
-| `list` | List all boq instances |
+| `list [--size]` | List all boq instances (`--size` also shows disk usage) |
 | `completion -s <shell>` | Output shell completion script |
 
 Default name is `default` for commands that accept `[name]`.
@@ -210,7 +216,8 @@ Environment variable expansion (`$HOME`, `$USER`, etc.) is supported in all stri
 - `create` sets up overlays, starts container, and enters shell (use `--no-enter` to skip)
 - `enter` attaches a shell; exiting detaches but container stays running
 - `run` executes a single command (container must be running)
-- `stop` explicitly stops container and unmounts overlays
+- `stop` immediately stops container and unmounts overlays (active sessions may be interrupted)
+- `destroy` immediately stops/removes container and deletes boq files (active sessions may be interrupted)
 - Container manages its own `/proc`, `/sys`, `/dev`, `/tmp`
 
 ### Overlay Directories

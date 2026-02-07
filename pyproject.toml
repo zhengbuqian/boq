@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "boq"
-version = "0.0.4"
+version = "0.0.5"
 description = "Safe YOLO with AI code tools: universal isolated development environment using kernel overlayfs"
 readme = "README.md"
 license = "MIT"

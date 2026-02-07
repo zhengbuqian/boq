@@ -239,24 +239,29 @@ def container_exists(name: str) -> bool:
     return result.returncode == 0
 
 
-def _container_is_rootful(name: str) -> bool:
-    """Check if a container is managed by rootful podman."""
-    result = run_cmd(["sudo", "podman", "container", "exists", name], check=False,
-                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    return result.returncode == 0
+def _container_running_with_prefix(name: str, prefix: list[str]) -> bool:
+    """Check if container is running with a specific podman prefix."""
+    result = run_cmd(prefix + ["podman", "inspect", "-f", "{{.State.Status}}", name],
+                     check=False, capture=True)
+    return result.returncode == 0 and result.stdout.strip() == "running"
+
+
+def _get_exec_prefix_for_running_container(name: str) -> list[str]:
+    """Return podman command prefix for currently running container.
+
+    Prefers rootful when rootful container is running; otherwise uses rootless.
+    """
+    if _container_running_with_prefix(name, ["sudo"]):
+        return ["sudo"]
+    if _container_running_with_prefix(name, []):
+        return []
+    # Fallback: new boqs default to rootful.
+    return ["sudo"]
 
 
 def container_running(name: str) -> bool:
     """Check if container is running (rootful or rootless)."""
-    # Rootful first
-    result = run_cmd(["sudo", "podman", "inspect", "-f", "{{.State.Status}}", name],
-                     check=False, capture=True)
-    if result.returncode == 0 and result.stdout.strip() == "running":
-        return True
-    # Fallback to rootless
-    result = run_cmd(["podman", "inspect", "-f", "{{.State.Status}}", name],
-                     check=False, capture=True)
-    return result.returncode == 0 and result.stdout.strip() == "running"
+    return _container_running_with_prefix(name, ["sudo"]) or _container_running_with_prefix(name, [])
 
 
 class Boq:
@@ -277,6 +282,12 @@ class Boq:
     _IP_RANGE_START = 100
     _IP_RANGE_END = 254
     _IP_PREFIX = "10.88.0."
+
+    def _should_use_static_ip(self) -> bool:
+        """Whether static IP should be configured for this boq."""
+        network = self.config.get("container.network")
+        # None/empty => podman default bridge network
+        return not network or network == "bridge"
 
     def exists(self) -> bool:
         """Check if boq directory exists."""
@@ -625,7 +636,7 @@ class Boq:
 
         # Static IP on default bridge (rootful podman supports --ip natively)
         ip = self.get_ip()
-        if ip and network != "host":
+        if ip and self._should_use_static_ip():
             optional_args.extend(["--ip", ip])
 
         # Extra arbitrary podman arguments
@@ -654,7 +665,7 @@ class Boq:
         run_cmd(cmd, stdout=subprocess.DEVNULL)
 
         # Update /etc/hosts with hostname mapping
-        if ip and network != "host":
+        if ip and self._should_use_static_ip():
             self._update_hosts(ip)
 
     def stop_container(self) -> bool:
@@ -692,8 +703,7 @@ class Boq:
             self.boq_dir.mkdir(parents=True, exist_ok=True)
 
             # Allocate static IP (safe under global lock - no races)
-            network = self.config.get("container.network")
-            if network != "host":
+            if self._should_use_static_ip():
                 ip = self._allocate_ip()
                 self._save_ip(ip)
 
@@ -757,6 +767,13 @@ class Boq:
                         run_cmd(prefix + ["podman", "rm", "-f", self.container_name],
                                 check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
+                # Legacy boqs may not have persisted IP. Allocate one before rootful start.
+                if self._should_use_static_ip() and not self.get_ip():
+                    global_lock = get_global_lock(self.boq_root, timeout=self._lock_timeout)
+                    with global_lock.exclusive():
+                        if not self.get_ip():
+                            self._save_ip(self._allocate_ip())
+
                 # Create missing overlay directories (for newly added overlays)
                 for src_path, overlay_name, merged in self.overlay_dirs():
                     if not merged.exists():
@@ -774,17 +791,18 @@ class Boq:
         """Execute shell in container."""
         shell = self.config.get("container.shell", "/bin/zsh")
         wd = workdir or os.getcwd()
+        podman_prefix = _get_exec_prefix_for_running_container(self.container_name)
 
         # Check if workdir exists in container, fallback to $HOME
         check = run_cmd(
-            ["sudo", "podman", "exec", self.container_name, "test", "-d", wd],
+            podman_prefix + ["podman", "exec", self.container_name, "test", "-d", wd],
             check=False
         )
         if check.returncode != 0:
             wd = os.environ.get("HOME", "/")
 
         result = run_cmd(
-            ["sudo", "podman", "exec", "-it", "-w", wd, self.container_name, shell],
+            podman_prefix + ["podman", "exec", "-it", "-w", wd, self.container_name, shell],
             check=False
         )
         return result.returncode
@@ -793,7 +811,7 @@ class Boq:
         """
         Run a command in the boq. Returns exit code.
 
-        Uses shared lock to prevent stop/destroy during execution.
+        Uses a shared lock for session-level coordination with enter/start flows.
 
         Args:
             command: Command string or list of arguments.
@@ -809,10 +827,11 @@ class Boq:
 
             shell = self.config.get("container.shell", "/bin/zsh")
             wd = workdir or os.getcwd()
+            podman_prefix = _get_exec_prefix_for_running_container(self.container_name)
 
             # Check if workdir exists in container, fallback to $HOME
             check = run_cmd(
-                ["sudo", "podman", "exec", self.container_name, "test", "-d", wd],
+                podman_prefix + ["podman", "exec", self.container_name, "test", "-d", wd],
                 check=False
             )
             if check.returncode != 0:
@@ -825,13 +844,13 @@ class Boq:
                 cmd_str = command
 
             result = run_cmd(
-                ["sudo", "podman", "exec", "-w", wd, self.container_name, shell, "-c", cmd_str],
+                podman_prefix + ["podman", "exec", "-w", wd, self.container_name, shell, "-c", cmd_str],
                 check=False
             )
             return result.returncode
 
     def stop(self) -> bool:
-        """Stop the boq. Returns True if was running."""
+        """Stop the boq immediately. Returns True if was running."""
         if not self.exists():
             raise BoqError(f"Boq '{self.name}' not found")
 
@@ -840,7 +859,7 @@ class Boq:
         return was_running
 
     def destroy(self) -> None:
-        """Destroy the boq."""
+        """Destroy the boq immediately (active sessions may be interrupted)."""
         if not self.exists():
             raise BoqError(f"Boq '{self.name}' not found")
 

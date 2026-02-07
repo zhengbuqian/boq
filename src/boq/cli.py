@@ -375,6 +375,7 @@ def cmd_list(args: argparse.Namespace) -> int:
 
     print(f"{Colors.BLUE}Boq instances:{Colors.NC}")
     for b in boqs:
+        display_name = f"boq-{b['name']}"
         status = ""
         if b["running"]:
             if b.get("rootless"):
@@ -391,9 +392,9 @@ def cmd_list(args: argparse.Namespace) -> int:
 
         if args.size:
             size_str = format_size(b["size"])
-            print(f"  {b['name']}{ip_col}  (changes: {size_str}) {status}")
+            print(f"  {display_name}{ip_col}  (changes: {size_str}) {status}")
         else:
-            print(f"  {b['name']}{ip_col}  {status}")
+            print(f"  {display_name}{ip_col}  {status}")
 
     return 0
 
@@ -426,9 +427,15 @@ _boq_completions() {
             fi
             return 0
             ;;
-        create|list)
+        create)
             COMPREPLY=()
             compopt +o default 2>/dev/null
+            return 0
+            ;;
+        list)
+            if [[ "$cur" == -* ]]; then
+                COMPREPLY=( $(compgen -W "--size" -- "$cur") )
+            fi
             return 0
             ;;
         completion)
@@ -437,11 +444,6 @@ _boq_completions() {
             ;;
         -s)
             COMPREPLY=( $(compgen -W "bash zsh" -- "$cur") )
-            return 0
-            ;;
-        --force-stop)
-            COMPREPLY=()
-            compopt +o default 2>/dev/null
             return 0
             ;;
     esac
@@ -463,9 +465,8 @@ _boq_completions() {
             fi
             ;;
         destroy)
-            if [[ "$cur" == -* ]]; then
-                COMPREPLY=( $(compgen -W "--force-stop" -- "$cur") )
-            fi
+            COMPREPLY=()
+            compopt +o default 2>/dev/null
             ;;
         diff)
             if [[ "$cur" == -* ]]; then
@@ -556,18 +557,18 @@ Examples:
     p.set_defaults(func=cmd_enter)
 
     # run
-    p = subparsers.add_parser("run", help="Run a command in boq (must be running)")
+    p = subparsers.add_parser("run", help="Run a command in boq (must be running; may be interrupted by stop/destroy)")
     p.add_argument("name", help="Boq name")
     p.add_argument("command", nargs=argparse.REMAINDER, help="Command to run")
     p.set_defaults(func=cmd_run)
 
     # stop
-    p = subparsers.add_parser("stop", help="Stop a running boq")
+    p = subparsers.add_parser("stop", help="Stop a boq immediately (may interrupt sessions)")
     p.add_argument("name", nargs="?", default="default", help="Boq name (default: default)")
     p.set_defaults(func=cmd_stop)
 
     # destroy
-    p = subparsers.add_parser("destroy", help="Destroy a boq")
+    p = subparsers.add_parser("destroy", help="Destroy a boq immediately (may interrupt sessions)")
     p.add_argument("name", help="Boq name")
     p.add_argument("--force-stop", action="store_true", help=argparse.SUPPRESS)  # no-op, kept for compat
     p.set_defaults(func=cmd_destroy)
