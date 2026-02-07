@@ -97,7 +97,7 @@ boq destroy dev
 | `enter [name]` | Attach shell to boq (starts if not running) |
 | `run <name> <cmd>` | Run a command in boq (must be running) |
 | `stop [name]` | Stop a running boq |
-| `destroy <name>` | Destroy a boq (fails if running, use `--force-stop`) |
+| `destroy <name>` | Destroy a boq (stops if running) |
 | `diff [name] [path]` | Show changes made in boq |
 | `status [name]` | Show boq status |
 | `list` | List all boq instances |

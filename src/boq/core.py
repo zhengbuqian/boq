@@ -3,6 +3,7 @@ Core boq operations: overlay mounting, container management.
 """
 
 import fcntl
+import logging
 import os
 import re
 import shlex
@@ -226,16 +227,33 @@ def is_mountpoint(path: Path) -> bool:
 
 
 def container_exists(name: str) -> bool:
-    """Check if container exists."""
+    """Check if container exists (rootful or rootless)."""
+    # Rootful first (new default)
+    result = run_cmd(["sudo", "podman", "container", "exists", name], check=False,
+                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    if result.returncode == 0:
+        return True
+    # Fallback to rootless (backward compat)
     result = run_cmd(["podman", "container", "exists", name], check=False,
                      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     return result.returncode == 0
 
 
+def _container_is_rootful(name: str) -> bool:
+    """Check if a container is managed by rootful podman."""
+    result = run_cmd(["sudo", "podman", "container", "exists", name], check=False,
+                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    return result.returncode == 0
+
+
 def container_running(name: str) -> bool:
-    """Check if container is running."""
-    if not container_exists(name):
-        return False
+    """Check if container is running (rootful or rootless)."""
+    # Rootful first
+    result = run_cmd(["sudo", "podman", "inspect", "-f", "{{.State.Status}}", name],
+                     check=False, capture=True)
+    if result.returncode == 0 and result.stdout.strip() == "running":
+        return True
+    # Fallback to rootless
     result = run_cmd(["podman", "inspect", "-f", "{{.State.Status}}", name],
                      check=False, capture=True)
     return result.returncode == 0 and result.stdout.strip() == "running"
@@ -255,6 +273,11 @@ class Boq:
         self._lock = BoqLock(self.boq_dir / ".lock", timeout=lock_timeout, check_destroyed=True)
         self._lock_timeout = lock_timeout
 
+    # Auto IP on rootful podman's default bridge (10.88.0.0/16)
+    _IP_RANGE_START = 100
+    _IP_RANGE_END = 254
+    _IP_PREFIX = "10.88.0."
+
     def exists(self) -> bool:
         """Check if boq directory exists."""
         return self.boq_dir.is_dir()
@@ -262,6 +285,89 @@ class Boq:
     def is_running(self) -> bool:
         """Check if boq container is running."""
         return container_running(self.container_name)
+
+    def get_ip(self) -> str | None:
+        """Read persisted IP from .ip file, or None if not set."""
+        ip_file = self.boq_dir / ".ip"
+        if ip_file.is_file():
+            ip = ip_file.read_text().strip()
+            if ip:
+                return ip
+        return None
+
+    def _save_ip(self, ip: str) -> None:
+        """Write IP to .ip file for persistence across start/stop."""
+        (self.boq_dir / ".ip").write_text(ip + "\n")
+
+    def _allocate_ip(self) -> str:
+        """Allocate next available IP from the bridge subnet range.
+
+        Scans ~/.boq/*/.ip to find used addresses, returns the lowest
+        available in 10.88.0.100-254. Must be called under global lock.
+        """
+        used = set()
+        for item in self.boq_root.iterdir():
+            if not item.is_dir():
+                continue
+            ip_file = item / ".ip"
+            if ip_file.is_file():
+                ip = ip_file.read_text().strip()
+                if ip.startswith(self._IP_PREFIX):
+                    try:
+                        octet = int(ip.split(".")[-1])
+                        used.add(octet)
+                    except ValueError:
+                        pass
+
+        for octet in range(self._IP_RANGE_START, self._IP_RANGE_END + 1):
+            if octet not in used:
+                return f"{self._IP_PREFIX}{octet}"
+
+        raise BoqError(
+            f"IP range exhausted ({self._IP_PREFIX}{self._IP_RANGE_START}-{self._IP_RANGE_END}). "
+            "Destroy unused boqs to free addresses."
+        )
+
+    def _update_hosts(self, ip: str) -> None:
+        """Add/update /etc/hosts entry for this boq. Idempotent, warns on failure."""
+        marker = f"# boq-managed:{self.name}"
+        new_line = f"{ip} {self.container_name}  {marker}"
+        try:
+            hosts = Path("/etc/hosts").read_text()
+            # Remove any existing entry for this boq
+            lines = [l for l in hosts.splitlines() if marker not in l]
+            lines.append(new_line)
+            content = "\n".join(lines) + "\n"
+            run_cmd(
+                ["sudo", "tee", "/etc/hosts"],
+                input=content, text=True,
+                stdout=subprocess.DEVNULL, check=True,
+            )
+        except Exception as e:
+            logging.getLogger("boq").warning(
+                "Could not update /etc/hosts for %s: %s (IP %s still works by address)",
+                self.container_name, e, ip,
+            )
+
+    def _remove_hosts(self) -> None:
+        """Remove /etc/hosts entry for this boq. Graceful: warns on failure."""
+        marker = f"# boq-managed:{self.name}"
+        try:
+            hosts = Path("/etc/hosts").read_text()
+            if marker not in hosts:
+                return
+            lines = [l for l in hosts.splitlines() if marker not in l]
+            content = "\n".join(lines) + "\n"
+            run_cmd(
+                ["sudo", "tee", "/etc/hosts"],
+                input=content, text=True,
+                stdout=subprocess.DEVNULL, check=True,
+            )
+        except Exception as e:
+            logging.getLogger("boq").warning(
+                "Could not remove /etc/hosts entry for %s: %s",
+                self.container_name, e,
+            )
 
     def overlay_dirs(self) -> Iterator[tuple[str, str, Path]]:
         """
@@ -315,15 +421,24 @@ class Boq:
         # First, try to unmount based on config
         for _, overlay_name, _ in self.overlay_dirs():
             self.unmount_overlay(overlay_name)
-        
-        # Second, safety net: check for any remaining mounts in boq_dir
+
+        # Safety net: check /proc/mounts for any remaining mounts under boq_dir
         # This handles cases where config changed or overlays were renamed
         if self.boq_dir.exists():
-            for root, dirs, _ in os.walk(self.boq_dir, topdown=False):
-                for d in dirs:
-                    path = Path(root) / d
-                    if is_mountpoint(path):
-                        run_sudo(["umount", str(path)], check=False)
+            boq_prefix = str(self.boq_dir) + "/"
+            try:
+                remaining = []
+                for line in Path("/proc/mounts").read_text().splitlines():
+                    parts = line.split()
+                    if len(parts) >= 2:
+                        target = parts[1]
+                        if target.startswith(boq_prefix):
+                            remaining.append(target)
+                # Unmount deepest paths first
+                for target in sorted(remaining, key=len, reverse=True):
+                    run_sudo(["umount", target], check=False)
+            except OSError:
+                pass  # /proc/mounts unavailable, first pass should have handled it
 
     def create_overlay_dirs(self, overlay_name: str) -> None:
         """Create overlay directory structure."""
@@ -447,6 +562,7 @@ class Boq:
             "PATH": os.environ.get("PATH", ""),
             "LANG": os.environ.get("LANG", "en_US.UTF-8"),
             "BOQ_NAME": self.name,
+            "BOQ_IP": self.get_ip() or "",
             "PS1": ps1,
             # Build tools
             "LD_LIBRARY_PATH": os.environ.get("LD_LIBRARY_PATH", ""),
@@ -507,14 +623,19 @@ class Boq:
         for device in devices:
             optional_args.extend(["--device", device])
 
+        # Static IP on default bridge (rootful podman supports --ip natively)
+        ip = self.get_ip()
+        if ip and network != "host":
+            optional_args.extend(["--ip", ip])
+
         # Extra arbitrary podman arguments
         extra_args = self.config.get("container.extra_args", [])
         optional_args.extend(extra_args)
 
         cmd = [
-            "podman", "run", "-d",
+            "sudo", "podman", "run", "-d",
             "--name", self.container_name,
-            "--userns=keep-id",
+            "--user", f"{os.getuid()}:{os.getgid()}",
             "--hostname", self.container_name,
         ] + volumes + [
             "--mount", "type=tmpfs,dst=/tmp,tmpfs-mode=1777",
@@ -532,16 +653,22 @@ class Boq:
 
         run_cmd(cmd, stdout=subprocess.DEVNULL)
 
+        # Update /etc/hosts with hostname mapping
+        if ip and network != "host":
+            self._update_hosts(ip)
+
     def stop_container(self) -> bool:
         """Stop and remove the container. Returns True if was running."""
         was_running = self.is_running()
 
-        if container_exists(self.container_name):
-            run_cmd(["podman", "stop", "-t", "5", self.container_name],
+        # Try rootful first, then rootless (backward compat)
+        for prefix in (["sudo"], []):
+            run_cmd(prefix + ["podman", "stop", "-t", "5", self.container_name],
                     check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            run_cmd(["podman", "rm", "-f", self.container_name],
+            run_cmd(prefix + ["podman", "rm", "-f", self.container_name],
                     check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
+        self._remove_hosts()
         return was_running
 
     def create(self, enter: bool = True, workdir: str | None = None) -> int:
@@ -563,6 +690,12 @@ class Boq:
 
             # Create boq directory (makes per-boq lock available)
             self.boq_dir.mkdir(parents=True, exist_ok=True)
+
+            # Allocate static IP (safe under global lock - no races)
+            network = self.config.get("container.network")
+            if network != "host":
+                ip = self._allocate_ip()
+                self._save_ip(ip)
 
             # Acquire per-boq lock while still holding global lock
             # This closes the race window where destroy could intervene
@@ -618,10 +751,11 @@ class Boq:
         with self._lock.exclusive() as lock:
             # Double-check after acquiring lock (another process might have started it)
             if not self.is_running():
-                # Clean up stale container
+                # Clean up stale container (try both rootful and rootless)
                 if container_exists(self.container_name):
-                    run_cmd(["podman", "rm", "-f", self.container_name],
-                            check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                    for prefix in (["sudo"], []):
+                        run_cmd(prefix + ["podman", "rm", "-f", self.container_name],
+                                check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
                 # Create missing overlay directories (for newly added overlays)
                 for src_path, overlay_name, merged in self.overlay_dirs():
@@ -643,14 +777,14 @@ class Boq:
 
         # Check if workdir exists in container, fallback to $HOME
         check = run_cmd(
-            ["podman", "exec", self.container_name, "test", "-d", wd],
+            ["sudo", "podman", "exec", self.container_name, "test", "-d", wd],
             check=False
         )
         if check.returncode != 0:
             wd = os.environ.get("HOME", "/")
 
         result = run_cmd(
-            ["podman", "exec", "-it", "-w", wd, self.container_name, shell],
+            ["sudo", "podman", "exec", "-it", "-w", wd, self.container_name, shell],
             check=False
         )
         return result.returncode
@@ -678,7 +812,7 @@ class Boq:
 
             # Check if workdir exists in container, fallback to $HOME
             check = run_cmd(
-                ["podman", "exec", self.container_name, "test", "-d", wd],
+                ["sudo", "podman", "exec", self.container_name, "test", "-d", wd],
                 check=False
             )
             if check.returncode != 0:
@@ -691,51 +825,28 @@ class Boq:
                 cmd_str = command
 
             result = run_cmd(
-                ["podman", "exec", "-w", wd, self.container_name, shell, "-c", cmd_str],
+                ["sudo", "podman", "exec", "-w", wd, self.container_name, shell, "-c", cmd_str],
                 check=False
             )
             return result.returncode
 
     def stop(self) -> bool:
-        """Stop the boq. Returns True if was running.
-
-        Acquires exclusive lock, waiting for all active sessions (shells, run commands)
-        to finish before stopping.
-        """
+        """Stop the boq. Returns True if was running."""
         if not self.exists():
             raise BoqError(f"Boq '{self.name}' not found")
 
-        # Exclusive lock waits for all shared locks (active sessions) to release
-        with self._lock.exclusive():
-            was_running = self.stop_container()
-            self.unmount_all_overlays()
-            return was_running
+        was_running = self.stop_container()
+        self.unmount_all_overlays()
+        return was_running
 
-    def destroy(self, force_stop: bool = False) -> None:
-        """Destroy the boq.
-
-        Acquires exclusive lock, waiting for all active sessions to finish.
-        The rm -rf is done inside the lock so that any process waiting for the lock
-        will detect the deletion via st_nlink check when it acquires the lock.
-        """
+    def destroy(self) -> None:
+        """Destroy the boq."""
         if not self.exists():
             raise BoqError(f"Boq '{self.name}' not found")
 
-        # Exclusive lock waits for all shared locks (active sessions) to release
-        with self._lock.exclusive():
-            if self.is_running():
-                if not force_stop:
-                    raise BoqError(f"Boq '{self.name}' is still running. Use --force-stop to stop and destroy.")
-                self.stop_container()
-                self.unmount_all_overlays()
-            else:
-                # Clean up stale state
-                self.stop_container()
-                self.unmount_all_overlays()
-
-            # Remove boq directory inside lock (includes lock file itself)
-            # This ensures waiters detect deletion via st_nlink == 0
-            safe_rmtree(self.boq_dir)
+        self.stop_container()
+        self.unmount_all_overlays()
+        safe_rmtree(self.boq_dir)
 
     def get_status(self) -> dict:
         """Get boq status information."""
@@ -744,6 +855,7 @@ class Boq:
             "location": str(self.boq_dir),
             "exists": self.exists(),
             "running": self.is_running(),
+            "ip": self.get_ip(),
             "overlays": {},
             "changes": {},
         }
@@ -763,7 +875,31 @@ class Boq:
         return status
 
 
-def list_boqs() -> list[dict]:
+def _get_running_boq_containers() -> tuple[set[str], set[str]]:
+    """Batch-query all running boq containers.
+
+    Returns (rootful, rootless) sets of container names.
+    """
+    rootful = set()
+    result = run_cmd(
+        ["sudo", "podman", "ps", "--format", "{{.Names}}", "--filter", "name=^boq-"],
+        capture=True, check=False,
+    )
+    if result.returncode == 0 and result.stdout.strip():
+        rootful = set(result.stdout.strip().splitlines())
+
+    rootless = set()
+    result = run_cmd(
+        ["podman", "ps", "--format", "{{.Names}}", "--filter", "name=^boq-"],
+        capture=True, check=False,
+    )
+    if result.returncode == 0 and result.stdout.strip():
+        rootless = set(result.stdout.strip().splitlines()) - rootful
+
+    return rootful, rootless
+
+
+def list_boqs(show_size: bool = False) -> list[dict]:
     """List all boq instances."""
     root = Path.home() / ".boq"
 
@@ -772,6 +908,9 @@ def list_boqs() -> list[dict]:
 
     boqs = []
     config = Config()
+
+    # Query both rootful and rootless containers
+    rootful_running, rootless_running = _get_running_boq_containers()
 
     for item in root.iterdir():
         if not item.is_dir():
@@ -790,20 +929,22 @@ def list_boqs() -> list[dict]:
         name = item.name
         container_name = f"boq-{name}"
 
-        # Calculate total size
+        # Calculate total size (only when requested)
         total_size = 0
-        for _, overlay_name in config.overlays.items():
-            upper = item / overlay_name / "upper"
-            if upper.is_dir():
-                result = run_cmd(["du", "-sb", str(upper)], capture=True, check=False)
-                if result.returncode == 0:
-                    try:
-                        total_size += int(result.stdout.split()[0])
-                    except (ValueError, IndexError):
-                        pass
+        if show_size:
+            for _, overlay_name in config.overlays.items():
+                upper = item / overlay_name / "upper"
+                if upper.is_dir():
+                    result = run_cmd(["du", "-sb", str(upper)], capture=True, check=False)
+                    if result.returncode == 0:
+                        try:
+                            total_size += int(result.stdout.split()[0])
+                        except (ValueError, IndexError):
+                            pass
 
-        # Get status
-        running = container_running(container_name)
+        # Get status from pre-fetched sets
+        running = container_name in rootful_running or container_name in rootless_running
+        rootless = container_name in rootless_running
         mounted = False
         if not running:
             for _, overlay_name in config.overlays.items():
@@ -812,11 +953,21 @@ def list_boqs() -> list[dict]:
                     mounted = True
                     break
 
+        # Read persisted IP
+        ip_file = item / ".ip"
+        ip = None
+        if ip_file.is_file():
+            ip_val = ip_file.read_text().strip()
+            if ip_val:
+                ip = ip_val
+
         boqs.append({
             "name": name,
             "size": total_size,
             "running": running,
             "mounted": mounted,
+            "ip": ip,
+            "rootless": rootless,
         })
 
     return boqs

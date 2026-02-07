@@ -56,11 +56,18 @@ def cmd_create(args: argparse.Namespace) -> int:
         if args.enter:
             log_info(f"Location: {boq.boq_dir}")
             log_info(f"Entering boq '{args.name}'...")
-            return boq.create(enter=True)
+            rc = boq.create(enter=True)
+            ip = boq.get_ip()
+            if ip:
+                log_info(f"IP: {ip}  Hostname: {boq.container_name}")
+            return rc
         else:
             boq.create(enter=False)
             log_ok(f"Created boq: {args.name}")
             log_info(f"Location: {boq.boq_dir}")
+            ip = boq.get_ip()
+            if ip:
+                log_info(f"IP: {ip}  Hostname: {boq.container_name}")
             log_info("Container is running. Use 'enter' to attach a shell.")
             return 0
     except LockTimeout as e:
@@ -128,21 +135,13 @@ def cmd_stop(args: argparse.Namespace) -> int:
 
     try:
         log_info(f"Stopping boq '{args.name}'...")
-        print(f"{Colors.BLUE}[INFO]{Colors.NC} (waiting for active sessions to finish...)", end="", flush=True)
         was_running = boq.stop()
-        print(" Done, stopping container...")
         if was_running:
             log_ok(f"Stopped boq: {args.name}")
         else:
             log_info(f"Boq '{args.name}' was not running")
         return 0
-    except LockTimeout as e:
-        print()  # newline after waiting message
-        log_error(str(e))
-        log_info("Hint: exit shells in other terminals, or use Ctrl+C to cancel")
-        return 1
     except BoqError as e:
-        print()  # newline after waiting message
         log_error(str(e))
         return 1
 
@@ -153,25 +152,11 @@ def cmd_destroy(args: argparse.Namespace) -> int:
 
     try:
         log_info(f"Destroying boq '{args.name}'...")
-        if args.force_stop:
-            print(f"{Colors.BLUE}[INFO]{Colors.NC} (waiting for active sessions to finish...)", end="", flush=True)
-        boq.destroy(force_stop=args.force_stop)
-        if args.force_stop:
-            print(" Done, destroying container...")
+        boq.destroy()
         log_ok(f"Destroyed boq: {args.name}")
         return 0
-    except LockTimeout as e:
-        if args.force_stop:
-            print()  # newline after waiting message
-        log_error(str(e))
-        log_info("Hint: exit shells in other terminals, or use Ctrl+C to cancel")
-        return 1
     except BoqError as e:
-        if args.force_stop:
-            print()  # newline after waiting message
         log_error(str(e))
-        if "still running" in str(e):
-            print(f"Use --force-stop to stop and destroy: boq destroy {args.name} --force-stop")
         return 1
 
 
@@ -340,6 +325,9 @@ def cmd_status(args: argparse.Namespace) -> int:
 
     print(f"{Colors.BLUE}Boq: {status['name']}{Colors.NC}")
     print(f"  Location: {status['location']}")
+    if status.get("ip"):
+        print(f"  IP: {status['ip']}")
+        print(f"  Hostname: boq-{status['name']}")
 
     print("  Overlays:")
     for src_path, mounted in status["overlays"].items():
@@ -371,23 +359,41 @@ def cmd_status(args: argparse.Namespace) -> int:
 
 def cmd_list(args: argparse.Namespace) -> int:
     """List all boqs."""
-    boqs = list_boqs()
+    boqs = list_boqs(show_size=args.size)
 
     if not boqs:
         log_info("No boq instances found")
         print("Create one with: boq create <name>")
         return 0
 
+    has_rootless = any(b.get("rootless") for b in boqs)
+    if has_rootless:
+        log_warn("Some boqs are running in legacy rootless mode (no host network access).")
+        print(f"  Run 'boq stop <name>' then 'boq enter <name>' to upgrade.")
+        print(f"  Upgraded boqs get a static IP reachable from host (e.g. curl boq-<name>:8080).")
+        print()
+
     print(f"{Colors.BLUE}Boq instances:{Colors.NC}")
     for b in boqs:
         status = ""
         if b["running"]:
-            status = f"{Colors.GREEN}[RUNNING]{Colors.NC}"
+            if b.get("rootless"):
+                status = f"{Colors.YELLOW}[RUNNING/rootless]{Colors.NC}"
+            else:
+                status = f"{Colors.GREEN}[RUNNING]{Colors.NC}"
         elif b["mounted"]:
             status = f"{Colors.YELLOW}[MOUNTED]{Colors.NC}"
+        else:
+            status = f"{Colors.YELLOW}[STOPPED]{Colors.NC}"
 
-        size_str = format_size(b["size"])
-        print(f"  {b['name']}  (changes: {size_str}) {status}")
+        ip_str = b.get("ip") or ""
+        ip_col = f"  {ip_str}" if ip_str else ""
+
+        if args.size:
+            size_str = format_size(b["size"])
+            print(f"  {b['name']}{ip_col}  (changes: {size_str}) {status}")
+        else:
+            print(f"  {b['name']}{ip_col}  {status}")
 
     return 0
 
@@ -530,7 +536,7 @@ Examples:
   boq diff dev            # See what changed
   boq diff dev ~/project  # See changes in ~/project only
   boq stop dev            # Stop boq
-  boq destroy dev         # Remove boq (must be stopped)
+  boq destroy dev         # Remove boq
 """,
         formatter_class=argparse.RawDescriptionHelpFormatter
     )
@@ -563,7 +569,7 @@ Examples:
     # destroy
     p = subparsers.add_parser("destroy", help="Destroy a boq")
     p.add_argument("name", help="Boq name")
-    p.add_argument("--force-stop", action="store_true", help="Stop boq if running before destroying")
+    p.add_argument("--force-stop", action="store_true", help=argparse.SUPPRESS)  # no-op, kept for compat
     p.set_defaults(func=cmd_destroy)
 
     # diff
@@ -581,6 +587,7 @@ Examples:
 
     # list
     p = subparsers.add_parser("list", help="List all boq instances")
+    p.add_argument("--size", action="store_true", help="Show disk usage for each boq (slower)")
     p.set_defaults(func=cmd_list)
 
     # completion
