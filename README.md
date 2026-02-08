@@ -31,14 +31,18 @@ Isolated development environment using Linux kernel overlayfs.
 - In default bridge mode, each boq gets a static IP and a host alias `boq-<name>`.
 - From host, you can access services inside boq directly, for example: `curl http://boq-dev:8080`.
 - Legacy rootless running boqs do not provide this host-access alias; restart them with `boq stop <name>` then `boq enter <name>` to upgrade.
+- For docker-backed boqs (`create --runtime docker`), boq auto-manages a user-defined network `boq-docker-net`. Its subnet is auto-detected once and persisted in `~/.boq/.docker-subnet`.
+- With docker runtime, `container.network` only supports `host` / `none` (or unset). Any other configured network name is rejected.
 
 ## Installation
 
-Requires Python 3.11+ and podman.
+Requires Python 3.11+ and one container runtime: podman or docker.
 
 ```bash
-# Install podman
+# Install one runtime (choose one)
 sudo apt install podman
+# or
+sudo apt install docker.io
 
 # Install boq (choose one)
 pipx install boq          # Recommended: isolated global install
@@ -99,8 +103,8 @@ boq destroy dev
 
 | Command | Description |
 |---------|-------------|
-| `create <name>` | Create a new boq and enter it (use `--no-enter` to skip) |
-| `enter [name]` | Attach shell to boq (starts if not running) |
+| `create <name>` | Create a new boq and enter it (use `--no-enter` to skip, use `--runtime` to pick backend, and `--docker-sudo/--no-docker-sudo` for docker mode) |
+| `enter [name]` | Attach shell to boq (starts if not running; use `--migrate-to-docker` to migrate a stopped boq to docker) |
 | `run <name> <cmd>` | Run a command in boq (must be running; may be interrupted by `stop`/`destroy`) |
 | `stop [name]` | Stop a boq immediately (may interrupt active sessions) |
 | `destroy <name>` | Destroy a boq immediately (stops if running; may interrupt active sessions) |
@@ -150,6 +154,14 @@ shell = "/bin/zsh"
 # Change base image
 image = "ubuntu:24.04"
 
+[runtime]
+# auto: prefer docker when available, else podman
+default = "auto"
+
+[docker]
+# default for create when runtime is docker
+use_sudo = false
+
 [container.env]
 # Add custom environment variables
 MY_VAR = "value"
@@ -186,6 +198,12 @@ image = "ubuntu:22.04"
 shell = "/bin/bash"
 capabilities = ["SYS_PTRACE"]
 
+[runtime]
+default = "auto"
+
+[docker]
+use_sudo = false
+
 [overlays]
 "$HOME" = "home"
 "/usr" = "usr"
@@ -215,6 +233,10 @@ Environment variable expansion (`$HOME`, `$USER`, etc.) is supported in all stri
 
 - `create` sets up overlays, starts container, and enters shell (use `--no-enter` to skip)
 - `enter` attaches a shell; exiting detaches but container stays running
+- `create` picks runtime automatically by default (prefer docker when available, else podman)
+- `create --runtime docker|podman` explicitly selects runtime
+- `create --docker-sudo/--no-docker-sudo` controls docker command prefix for that boq
+- `enter --migrate-to-docker` can migrate a stopped podman boq to docker backend
 - `run` executes a single command (container must be running)
 - `stop` immediately stops container and unmounts overlays (active sessions may be interrupted)
 - `destroy` immediately stops/removes container and deletes boq files (active sessions may be interrupted)

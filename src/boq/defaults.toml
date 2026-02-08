@@ -37,6 +37,18 @@ capabilities = ["SYS_PTRACE"]
 # For advanced use cases not covered by other options
 # extra_args = ["--shm-size=2g", "--ulimit", "nofile=65535:65535"]
 
+[runtime]
+# Default runtime selection strategy:
+#   auto   -> prefer docker when available, otherwise use podman
+#   docker -> always use docker
+#   podman -> always use podman
+default = "auto"
+
+[docker]
+# Whether boq should invoke docker with sudo by default.
+# Can be overridden per-create via --docker-sudo / --no-docker-sudo.
+use_sudo = false
+
 [container.env]
 # Environment variables passed to the container
 # Values starting with $ are expanded from host environment

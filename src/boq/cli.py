@@ -56,13 +56,21 @@ def cmd_create(args: argparse.Namespace) -> int:
         if args.enter:
             log_info(f"Location: {boq.boq_dir}")
             log_info(f"Entering boq '{args.name}'...")
-            rc = boq.create(enter=True)
+            rc = boq.create(
+                enter=True,
+                runtime=args.runtime,
+                docker_sudo=args.docker_sudo,
+            )
             ip = boq.get_ip()
             if ip:
                 log_info(f"IP: {ip}  Hostname: {boq.container_name}")
             return rc
         else:
-            boq.create(enter=False)
+            boq.create(
+                enter=False,
+                runtime=args.runtime,
+                docker_sudo=args.docker_sudo,
+            )
             log_ok(f"Created boq: {args.name}")
             log_info(f"Location: {boq.boq_dir}")
             ip = boq.get_ip()
@@ -95,7 +103,7 @@ def cmd_enter(args: argparse.Namespace) -> int:
             log_info("Starting container...")
             log_info(f"Attaching to boq '{args.name}'...")
 
-        return boq.enter()
+        return boq.enter(migrate_to_docker=args.migrate_to_docker)
     except BoqDestroyed as e:
         log_error(f"Boq '{args.name}' was destroyed while waiting")
         return 1
@@ -325,6 +333,8 @@ def cmd_status(args: argparse.Namespace) -> int:
 
     print(f"{Colors.BLUE}Boq: {status['name']}{Colors.NC}")
     print(f"  Location: {status['location']}")
+    print(f"  Container Type: {status.get('container_type', 'unknown')}")
+    print(f"  Runtime Mode: {'sudo' if status.get('use_sudo') else 'direct'}")
     if status.get("ip"):
         print(f"  IP: {status['ip']}")
         print(f"  Hostname: boq-{status['name']}")
@@ -366,7 +376,7 @@ def cmd_list(args: argparse.Namespace) -> int:
         print("Create one with: boq create <name>")
         return 0
 
-    has_rootless = any(b.get("rootless") for b in boqs)
+    has_rootless = any(b.get("container_type") == "podman-rootless" for b in boqs)
     if has_rootless:
         log_warn("Some boqs are running in legacy rootless mode (no host network access).")
         print(f"  Run 'boq stop <name>' then 'boq enter <name>' to upgrade.")
@@ -374,27 +384,69 @@ def cmd_list(args: argparse.Namespace) -> int:
         print()
 
     print(f"{Colors.BLUE}Boq instances:{Colors.NC}")
+    rows = []
     for b in boqs:
-        display_name = f"boq-{b['name']}"
-        status = ""
+        boq_name = b["name"]
+        container_name = f"boq-{boq_name}"
+        ip = b.get("ip") or "-"
+        container_type = b.get("container_type", "unknown")
+        mode = "sudo" if b.get("use_sudo") else "direct"
         if b["running"]:
-            if b.get("rootless"):
-                status = f"{Colors.YELLOW}[RUNNING/rootless]{Colors.NC}"
-            else:
-                status = f"{Colors.GREEN}[RUNNING]{Colors.NC}"
+            status = "RUNNING/rootless" if container_type == "podman-rootless" else "RUNNING"
         elif b["mounted"]:
-            status = f"{Colors.YELLOW}[MOUNTED]{Colors.NC}"
+            status = "MOUNTED"
         else:
-            status = f"{Colors.YELLOW}[STOPPED]{Colors.NC}"
+            status = "STOPPED"
+        if status == "RUNNING":
+            status_colored = f"{Colors.GREEN}{status}{Colors.NC}"
+        else:
+            status_colored = f"{Colors.YELLOW}{status}{Colors.NC}"
 
-        ip_str = b.get("ip") or ""
-        ip_col = f"  {ip_str}" if ip_str else ""
+        rows.append({
+            "boq_name": boq_name,
+            "container_host": container_name,
+            "ip": ip,
+            "container_type": container_type,
+            "mode": mode,
+            "status": status,
+            "status_colored": status_colored,
+            "size": format_size(b["size"]) if args.size else "",
+        })
 
+    boq_name_w = max(len("Boq Name"), *(len(r["boq_name"]) for r in rows))
+    container_host_w = max(len("Container Name/Hostname"), *(len(r["container_host"]) for r in rows))
+    ip_w = max(len("IP"), *(len(r["ip"]) for r in rows))
+    type_w = max(len("Container Type"), *(len(r["container_type"]) for r in rows))
+    mode_w = max(len("Mode"), *(len(r["mode"]) for r in rows))
+    status_w = max(len("Status"), *(len(r["status"]) for r in rows))
+    size_w = max(len("Changes"), *(len(r["size"]) for r in rows)) if args.size else 0
+
+    header_parts = [
+        f"{'Boq Name':<{boq_name_w}}",
+        f"{'Container Name/Hostname':<{container_host_w}}",
+        f"{'IP':<{ip_w}}",
+        f"{'Container Type':<{type_w}}",
+        f"{'Mode':<{mode_w}}",
+    ]
+    if args.size:
+        header_parts.append(f"{'Changes':<{size_w}}")
+    header_parts.append(f"{'Status':<{status_w}}")
+    header = "  " + "  ".join(header_parts)
+    print(header)
+    print("  " + "-" * (len(header) - 2))
+
+    for r in rows:
+        line_parts = [
+            f"{r['boq_name']:<{boq_name_w}}",
+            f"{r['container_host']:<{container_host_w}}",
+            f"{r['ip']:<{ip_w}}",
+            f"{r['container_type']:<{type_w}}",
+            f"{r['mode']:<{mode_w}}",
+        ]
         if args.size:
-            size_str = format_size(b["size"])
-            print(f"  {display_name}{ip_col}  (changes: {size_str}) {status}")
-        else:
-            print(f"  {display_name}{ip_col}  {status}")
+            line_parts.append(f"{r['size']:<{size_w}}")
+        line_parts.append(r["status_colored"])
+        print("  " + "  ".join(line_parts))
 
     return 0
 
@@ -415,7 +467,21 @@ _boq_completions() {
             COMPREPLY=( $(compgen -W "$commands" -- "$cur") )
             return 0
             ;;
-        enter|stop|destroy|diff|status|run)
+        enter)
+            if [[ "$cur" == -* ]]; then
+                COMPREPLY=( $(compgen -W "--migrate-to-docker" -- "$cur") )
+            elif [[ -d "$boq_root" ]]; then
+                local boqs=""
+                for dir in "$boq_root"/*/; do
+                    [[ -d "$dir" ]] || continue
+                    local name=$(basename "$dir")
+                    [[ -d "$dir/home" || -d "$dir/usr" || -d "$dir/opt" ]] && boqs="$boqs $name"
+                done
+                COMPREPLY=( $(compgen -W "$boqs" -- "$cur") )
+            fi
+            return 0
+            ;;
+        stop|destroy|diff|status|run)
             if [[ -d "$boq_root" ]]; then
                 local boqs=""
                 for dir in "$boq_root"/*/; do
@@ -428,8 +494,16 @@ _boq_completions() {
             return 0
             ;;
         create)
-            COMPREPLY=()
-            compopt +o default 2>/dev/null
+            if [[ "$cur" == -* ]]; then
+                COMPREPLY=( $(compgen -W "--no-enter --runtime --docker-sudo --no-docker-sudo" -- "$cur") )
+            else
+                COMPREPLY=()
+                compopt +o default 2>/dev/null
+            fi
+            return 0
+            ;;
+        --runtime)
+            COMPREPLY=( $(compgen -W "docker podman" -- "$cur") )
             return 0
             ;;
         list)
@@ -461,7 +535,12 @@ _boq_completions() {
     case "$cmd" in
         create)
             if [[ "$cur" == -* ]]; then
-                COMPREPLY=( $(compgen -W "--no-enter" -- "$cur") )
+                COMPREPLY=( $(compgen -W "--no-enter --runtime --docker-sudo --no-docker-sudo" -- "$cur") )
+            fi
+            ;;
+        enter)
+            if [[ "$cur" == -* ]]; then
+                COMPREPLY=( $(compgen -W "--migrate-to-docker" -- "$cur") )
             fi
             ;;
         destroy)
@@ -521,8 +600,19 @@ def main() -> int:
     # Check dependencies
     missing = check_dependencies()
     if missing:
-        log_error(f"Missing dependencies: {', '.join(missing)}")
-        print(f"Install with: sudo apt install {' '.join(missing)}")
+        if "podman-or-docker" in missing:
+            other_missing = [m for m in missing if m != "podman-or-docker"]
+            if other_missing:
+                log_error(f"Missing dependencies: {', '.join(other_missing)}, and one of podman/docker")
+                print(f"Install with: sudo apt install {' '.join(other_missing)} podman")
+                print("Or use docker instead of podman.")
+            else:
+                log_error("Missing container runtime: install podman or docker")
+                print("Install with: sudo apt install podman")
+                print("Or: sudo apt install docker.io")
+        else:
+            log_error(f"Missing dependencies: {', '.join(missing)}")
+            print(f"Install with: sudo apt install {' '.join(missing)}")
         return 1
 
     parser = argparse.ArgumentParser(
@@ -531,8 +621,11 @@ def main() -> int:
         epilog="""
 Examples:
   boq create dev          # Create boq and enter it
+  boq create dev --runtime docker          # Create boq with docker backend
+  boq create dev --runtime docker --docker-sudo  # Use sudo docker backend
   boq create dev --no-enter  # Create boq without entering
   boq enter dev           # Re-enter existing boq
+  boq enter dev --migrate-to-docker  # Migrate stopped boq to docker backend
   boq run dev "make"      # Run command in boq
   boq diff dev            # See what changed
   boq diff dev ~/project  # See changes in ~/project only
@@ -549,11 +642,27 @@ Examples:
     p.add_argument("name", help="Boq name")
     p.add_argument("--no-enter", dest="enter", action="store_false",
                    help="Don't enter the boq after creating (default: enter)")
+    p.add_argument(
+        "--runtime",
+        choices=["docker", "podman"],
+        help="Container runtime for this boq (default: auto prefers docker, falls back to podman)",
+    )
+    p.add_argument(
+        "--docker-sudo",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Use sudo for docker commands (docker runtime only)",
+    )
     p.set_defaults(func=cmd_create, enter=True)
 
     # enter
     p = subparsers.add_parser("enter", help="Attach shell to boq (starts if not running)")
     p.add_argument("name", nargs="?", default="default", help="Boq name (default: default)")
+    p.add_argument(
+        "--migrate-to-docker",
+        action="store_true",
+        help="If stopped, migrate this boq from podman runtime to docker",
+    )
     p.set_defaults(func=cmd_enter)
 
     # run
