@@ -169,6 +169,7 @@ etc_files = [
     "profile",         # System-wide shell profile
     "profile.d",       # Shell profile scripts directory
     "inputrc",         # Readline configuration
+    "manpath.config",  # man-db configuration
 
     # Misc
     "alternatives",    # Debian alternatives system

@@ -18,7 +18,7 @@ class Colors:
     RED = "\033[0;31m"
     GREEN = "\033[0;32m"
     YELLOW = "\033[0;33m"
-    BLUE = "\033[0;34m"
+    BLUE = "\033[1;36m"
     NC = "\033[0m"  # No Color
 
 
@@ -97,9 +97,8 @@ def cmd_create(args: argparse.Namespace) -> int:
             return 0
         elif args.enter:
             log_info(f"Location: {boq.boq_dir}")
-            log_info(f"Entering boq '{args.name}'...")
-            rc = boq.create(
-                enter=True,
+            boq.create(
+                enter=False,
                 runtime=args.runtime,
                 docker_sudo=args.docker_sudo,
                 data_dir=args.data_dir,
@@ -110,7 +109,8 @@ def cmd_create(args: argparse.Namespace) -> int:
             ip = boq.get_ip()
             if ip:
                 log_info(f"IP: {ip}  Hostname: {boq.container_name}")
-            return rc
+            log_info(f"Entering boq '{args.name}'...")
+            return boq.enter()
         else:
             boq.create(
                 enter=False,
