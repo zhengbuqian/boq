@@ -4,8 +4,10 @@ Command-line interface for boq tool.
 
 import argparse
 import os
+import re
 import subprocess
 import sys
+from importlib.metadata import PackageNotFoundError, version as package_version
 from pathlib import Path
 
 from .core import Boq, BoqError, BoqDestroyed, LockTimeout, list_boqs, check_dependencies, run_cmd, detect_inside_boq
@@ -34,6 +36,22 @@ def log_warn(msg: str) -> None:
 
 def log_error(msg: str) -> None:
     print(f"{Colors.RED}[ERROR]{Colors.NC} {msg}", file=sys.stderr)
+
+
+def get_boq_version() -> str:
+    """Get installed boq version, with pyproject fallback for source runs."""
+    try:
+        return package_version("boq")
+    except PackageNotFoundError:
+        pyproject = Path(__file__).resolve().parents[2] / "pyproject.toml"
+        try:
+            for line in pyproject.read_text().splitlines():
+                m = re.match(r'^\s*version\s*=\s*"([^"]+)"\s*$', line)
+                if m:
+                    return m.group(1)
+        except OSError:
+            pass
+    return "unknown"
 
 
 def format_size(size_bytes: int) -> str:
@@ -460,7 +478,7 @@ _boq_completions() {
 
     boq_root="$HOME/.boq"
 
-    commands="create enter run stop destroy diff status list completion --help"
+    commands="create enter run stop destroy diff status list completion version --help"
 
     case "$prev" in
         boq|*/boq)
@@ -525,7 +543,7 @@ _boq_completions() {
     local cmd=""
     for word in "${COMP_WORDS[@]}"; do
         case "$word" in
-            create|enter|run|stop|destroy|diff|status|list|completion)
+            create|enter|run|stop|destroy|diff|status|list|completion|version)
                 cmd="$word"
                 break
                 ;;
@@ -588,6 +606,13 @@ def cmd_completion(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_version(args: argparse.Namespace) -> int:
+    """Show boq version."""
+    _ = args
+    print(get_boq_version())
+    return 0
+
+
 def main() -> int:
     """Main entry point."""
     # Check if running inside a boq container
@@ -595,24 +620,6 @@ def main() -> int:
     if inside_boq:
         log_error("Cannot run boq inside a boq container")
         print("Hint: exit the current boq first, then run boq commands on the host.")
-        return 1
-
-    # Check dependencies
-    missing = check_dependencies()
-    if missing:
-        if "podman-or-docker" in missing:
-            other_missing = [m for m in missing if m != "podman-or-docker"]
-            if other_missing:
-                log_error(f"Missing dependencies: {', '.join(other_missing)}, and one of podman/docker")
-                print(f"Install with: sudo apt install {' '.join(other_missing)} podman")
-                print("Or use docker instead of podman.")
-            else:
-                log_error("Missing container runtime: install podman or docker")
-                print("Install with: sudo apt install podman")
-                print("Or: sudo apt install docker.io")
-        else:
-            log_error(f"Missing dependencies: {', '.join(missing)}")
-            print(f"Install with: sudo apt install {' '.join(missing)}")
         return 1
 
     parser = argparse.ArgumentParser(
@@ -631,6 +638,7 @@ Examples:
   boq diff dev ~/project  # See changes in ~/project only
   boq stop dev            # Stop boq
   boq destroy dev         # Remove boq
+  boq version             # Show boq version
 """,
         formatter_class=argparse.RawDescriptionHelpFormatter
     )
@@ -706,11 +714,34 @@ Examples:
                    help="Shell type (default: bash)")
     p.set_defaults(func=cmd_completion)
 
+    # version
+    p = subparsers.add_parser("version", help="Show boq version")
+    p.set_defaults(func=cmd_version)
+
     args = parser.parse_args()
 
     if args.command is None:
         parser.print_help()
         return 1
+
+    # Check dependencies (skip for commands that should always be available)
+    if args.command not in {"version", "completion"}:
+        missing = check_dependencies()
+        if missing:
+            if "podman-or-docker" in missing:
+                other_missing = [m for m in missing if m != "podman-or-docker"]
+                if other_missing:
+                    log_error(f"Missing dependencies: {', '.join(other_missing)}, and one of podman/docker")
+                    print(f"Install with: sudo apt install {' '.join(other_missing)} podman")
+                    print("Or use docker instead of podman.")
+                else:
+                    log_error("Missing container runtime: install podman or docker")
+                    print("Install with: sudo apt install podman")
+                    print("Or: sudo apt install docker.io")
+            else:
+                log_error(f"Missing dependencies: {', '.join(missing)}")
+                print(f"Install with: sudo apt install {' '.join(missing)}")
+            return 1
 
     try:
         return args.func(args)

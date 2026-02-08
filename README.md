@@ -111,6 +111,7 @@ boq destroy dev
 | `diff [name] [path]` | Show changes made in boq |
 | `status [name]` | Show boq status |
 | `list [--size]` | List all boq instances (`--size` also shows disk usage) |
+| `version` | Show current boq version |
 | `completion -s <shell>` | Output shell completion script |
 
 Default name is `default` for commands that accept `[name]`.
