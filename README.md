@@ -60,7 +60,7 @@ Optionally, add the following to your `~/.bashrc` or `~/.zshrc` to get auto comp
 ```bash
 if [ -z "$BOQ_NAME" ]; then
     # add auto completion only in host.
-    eval "$(boq completion -s zsh)"
+    eval "$(boq completion -s zsh 2>/dev/null)"
 else
     echo "In boq env, using yolo mode by default for AI cli tools."
     alias claude="claude --dangerously-skip-permissions"
@@ -132,7 +132,7 @@ boq diff dev --include-metadata   # Include metadata-only changes
 eval "$(boq completion -s bash)"
 
 # Zsh: add to ~/.zshrc
-eval "$(boq completion -s zsh)"
+eval "$(boq completion -s zsh 2>/dev/null)"
 ```
 
 ## Configuration
