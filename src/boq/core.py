@@ -920,9 +920,22 @@ class Boq:
             str(merged)
         ])
 
+    def _skipped_overlay_sources(self) -> set[str]:
+        """Return resolved overlay source paths overridden by passthrough/direct mounts."""
+        passthrough_resolved = {
+            str(Path(p).resolve()) for p in self.config.passthrough_paths
+        }
+        direct_resolved = {
+            str(Path(p).resolve()) for p in self.config.direct_mounts
+        }
+        return passthrough_resolved | direct_resolved
+
     def mount_all_overlays(self) -> None:
         """Mount all overlay directories."""
+        skip = self._skipped_overlay_sources()
         for src_path, overlay_name, _ in self.overlay_dirs():
+            if str(Path(src_path).resolve()) in skip:
+                continue
             self.mount_overlay(src_path, overlay_name)
 
     def unmount_overlay(self, overlay_name: str) -> None:
@@ -1005,9 +1018,12 @@ class Boq:
     def build_volumes(self) -> list[str]:
         """Build volume mount arguments for podman."""
         volumes = []
+        skip = self._skipped_overlay_sources()
 
-        # Overlayed directories
+        # Overlayed directories (skip if overridden by passthrough/direct mount)
         for src_path, overlay_name, merged in self.overlay_dirs():
+            if str(Path(src_path).resolve()) in skip:
+                continue
             volumes.extend(["-v", f"{merged}:{src_path}"])
 
         # Passthrough paths (bypass overlay)

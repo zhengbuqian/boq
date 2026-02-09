@@ -137,13 +137,13 @@ def cmd_run(args: argparse.Namespace) -> int:
     """Run a command in boq."""
     boq = Boq(args.name)
 
-    if not args.command:
+    if not args.run_command:
         log_error("No command specified")
         print("Usage: boq run <name> <command>")
         return 1
 
     try:
-        return boq.run(args.command)
+        return boq.run(args.run_command)
     except BoqDestroyed as e:
         log_error(f"Boq '{args.name}' was destroyed while waiting")
         return 1
@@ -676,7 +676,7 @@ Examples:
     # run
     p = subparsers.add_parser("run", help="Run a command in boq (must be running; may be interrupted by stop/destroy)")
     p.add_argument("name", help="Boq name")
-    p.add_argument("command", nargs=argparse.REMAINDER, help="Command to run")
+    p.add_argument("run_command", nargs=argparse.REMAINDER, help="Command to run")
     p.set_defaults(func=cmd_run)
 
     # stop
