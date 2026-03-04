@@ -86,6 +86,12 @@ boq create dev
 # Re-enter existing boq
 boq enter dev
 
+# Open VS Code attached to boq
+boq code dev
+
+# Create and open in VS Code directly
+boq create dev --code
+
 # See what changed
 boq diff dev
 
@@ -103,8 +109,9 @@ boq destroy dev
 
 | Command | Description |
 |---------|-------------|
-| `create <name>` | Create a new boq and enter it (use `--no-enter` to skip, use `--runtime` to pick backend, and `--docker-sudo/--no-docker-sudo` for docker mode) |
+| `create <name>` | Create a new boq and enter it (use `--no-enter` to skip, `--code` to open VS Code, `--runtime` to pick backend, and `--docker-sudo/--no-docker-sudo` for docker mode) |
 | `enter [name]` | Attach shell to boq (starts if not running; use `--migrate-to-docker` to migrate a stopped boq to docker) |
+| `code [name]` | Open VS Code attached to boq (starts if not running; use `--workdir` to set working directory) |
 | `run <name> <cmd>` | Run a command in boq (must be running; may be interrupted by `stop`/`destroy`) |
 | `stop [name]` | Stop a boq immediately (may interrupt active sessions) |
 | `destroy <name>` | Destroy a boq immediately (stops if running; may interrupt active sessions) |
@@ -232,8 +239,9 @@ Environment variable expansion (`$HOME`, `$USER`, etc.) is supported in all stri
 
 ## How It Works
 
-- `create` sets up overlays, starts container, and enters shell (use `--no-enter` to skip)
+- `create` sets up overlays, starts container, and enters shell (use `--no-enter` to skip, `--code` to open VS Code instead)
 - `enter` attaches a shell; exiting detaches but container stays running
+- `code` opens VS Code attached to the container via Dev Containers extension (starts container if needed)
 - `create` picks runtime automatically by default (prefer docker when available, else podman)
 - `create --runtime docker|podman` explicitly selects runtime
 - `create --docker-sudo/--no-docker-sudo` controls docker command prefix for that boq
@@ -357,7 +365,17 @@ Since boq isolates files via overlayfs, editors on the host can't directly see c
 
 #### Option 1: Attach editor to the container (Recommended)
 
-Use the **Dev Containers** extension to attach to the running boq container:
+For VS Code, use the built-in `boq code` command which handles everything automatically:
+
+```bash
+boq code dev              # Open VS Code attached to running boq
+boq create dev --code     # Create boq and open VS Code directly
+boq code dev -w ~/project # Open a specific directory
+```
+
+This requires VS Code CLI (`code`) in PATH and the **Dev Containers** extension (`ms-vscode-remote.remote-containers`). `boq code` will validate both and show installation instructions if missing.
+
+Alternatively, attach manually via the Dev Containers extension:
 
 1. Install "Dev Containers" extension
 2. `Ctrl+Shift+P` → "Dev Containers: Attach to Running Container..."

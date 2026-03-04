@@ -70,8 +70,32 @@ def cmd_create(args: argparse.Namespace) -> int:
     boq = Boq(args.name)
 
     try:
+        # --code: validate VS Code before creating (fail early, no side effects)
+        if args.code:
+            boq._ensure_vscode_available()
+
         log_info("Creating boq...")
-        if args.enter:
+        if args.code:
+            # --code takes precedence: create without entering, then open VS Code
+            boq.create(
+                enter=False,
+                runtime=args.runtime,
+                docker_sudo=args.docker_sudo,
+                data_dir=args.data_dir,
+            )
+            log_ok(f"Created boq: {args.name}")
+            log_info(f"Location: {boq.boq_dir}")
+            data = boq.data_dir
+            if data != boq.boq_dir:
+                log_info(f"Data dir: {data}")
+            ip = boq.get_ip()
+            if ip:
+                log_info(f"IP: {ip}  Hostname: {boq.container_name}")
+            log_info(f"Opening VS Code for boq '{args.name}'...")
+            boq.open_vscode()
+            log_ok(f"VS Code launched for boq '{args.name}'")
+            return 0
+        elif args.enter:
             log_info(f"Location: {boq.boq_dir}")
             log_info(f"Entering boq '{args.name}'...")
             rc = boq.create(
@@ -137,6 +161,28 @@ def cmd_enter(args: argparse.Namespace) -> int:
         log_error(str(e))
         return 1
     except BoqError as e:
+        log_error(str(e))
+        return 1
+
+
+def cmd_code(args: argparse.Namespace) -> int:
+    """Open VS Code attached to a boq container."""
+    boq = Boq(args.name)
+    try:
+        if not boq.exists():
+            log_error(f"Boq '{args.name}' not found")
+            print(f"Create it first: boq create {args.name}")
+            return 1
+        if boq.is_running():
+            log_info(f"Opening VS Code for boq '{args.name}'...")
+        else:
+            log_info("Starting container...")
+            log_info(f"Opening VS Code for boq '{args.name}'...")
+        rc = boq.code(workdir=args.workdir)
+        if rc == 0:
+            log_ok(f"VS Code launched for boq '{args.name}'")
+        return rc
+    except (BoqDestroyed, LockTimeout, BoqError) as e:
         log_error(str(e))
         return 1
 
@@ -497,7 +543,7 @@ _boq_completions() {
 
     boq_root="$HOME/.boq"
 
-    commands="create enter run stop destroy diff status list completion version --help"
+    commands="create enter code run stop destroy diff status list completion version --help"
 
     case "$prev" in
         boq|*/boq)
@@ -507,6 +553,20 @@ _boq_completions() {
         enter)
             if [[ "$cur" == -* ]]; then
                 COMPREPLY=( $(compgen -W "--migrate-to-docker" -- "$cur") )
+            elif [[ -d "$boq_root" ]]; then
+                local boqs=""
+                for dir in "$boq_root"/*/; do
+                    [[ -d "$dir" ]] || continue
+                    local name=$(basename "$dir")
+                    [[ -d "$dir/home" || -d "$dir/usr" || -d "$dir/opt" ]] && boqs="$boqs $name"
+                done
+                COMPREPLY=( $(compgen -W "$boqs" -- "$cur") )
+            fi
+            return 0
+            ;;
+        code)
+            if [[ "$cur" == -* ]]; then
+                COMPREPLY=( $(compgen -W "--workdir -w" -- "$cur") )
             elif [[ -d "$boq_root" ]]; then
                 local boqs=""
                 for dir in "$boq_root"/*/; do
@@ -532,7 +592,7 @@ _boq_completions() {
             ;;
         create)
             if [[ "$cur" == -* ]]; then
-                COMPREPLY=( $(compgen -W "--no-enter --runtime --docker-sudo --no-docker-sudo --data-dir" -- "$cur") )
+                COMPREPLY=( $(compgen -W "--no-enter --runtime --docker-sudo --no-docker-sudo --data-dir --code" -- "$cur") )
             else
                 COMPREPLY=()
                 compopt +o default 2>/dev/null
@@ -562,7 +622,7 @@ _boq_completions() {
     local cmd=""
     for word in "${COMP_WORDS[@]}"; do
         case "$word" in
-            create|enter|run|stop|destroy|diff|status|list|completion|version)
+            create|enter|code|run|stop|destroy|diff|status|list|completion|version)
                 cmd="$word"
                 break
                 ;;
@@ -572,12 +632,17 @@ _boq_completions() {
     case "$cmd" in
         create)
             if [[ "$cur" == -* ]]; then
-                COMPREPLY=( $(compgen -W "--no-enter --runtime --docker-sudo --no-docker-sudo --data-dir" -- "$cur") )
+                COMPREPLY=( $(compgen -W "--no-enter --runtime --docker-sudo --no-docker-sudo --data-dir --code" -- "$cur") )
             fi
             ;;
         enter)
             if [[ "$cur" == -* ]]; then
                 COMPREPLY=( $(compgen -W "--migrate-to-docker" -- "$cur") )
+            fi
+            ;;
+        code)
+            if [[ "$cur" == -* ]]; then
+                COMPREPLY=( $(compgen -W "--workdir -w" -- "$cur") )
             fi
             ;;
         destroy)
@@ -652,6 +717,8 @@ Examples:
   boq create dev --no-enter  # Create boq without entering
   boq enter dev           # Re-enter existing boq
   boq enter dev --migrate-to-docker  # Migrate stopped boq to docker backend
+  boq code dev            # Open VS Code attached to boq
+  boq create dev --code   # Create boq and open VS Code
   boq run dev "make"      # Run command in boq
   boq diff dev            # See what changed
   boq diff dev ~/project  # See changes in ~/project only
@@ -684,7 +751,9 @@ Examples:
         "--data-dir",
         help="Base path for overlay data (instance name appended automatically)",
     )
-    p.set_defaults(func=cmd_create, enter=True)
+    p.add_argument("--code", action="store_true",
+                   help="Open VS Code instead of entering shell after creation")
+    p.set_defaults(func=cmd_create, enter=True, code=False)
 
     # enter
     p = subparsers.add_parser("enter", help="Attach shell to boq (starts if not running)")
@@ -695,6 +764,12 @@ Examples:
         help="If stopped, migrate this boq from podman runtime to docker",
     )
     p.set_defaults(func=cmd_enter)
+
+    # code
+    p = subparsers.add_parser("code", help="Open VS Code attached to boq (starts if not running)")
+    p.add_argument("name", nargs="?", default="default", help="Boq name (default: default)")
+    p.add_argument("--workdir", "-w", help="Working directory to open in VS Code")
+    p.set_defaults(func=cmd_code)
 
     # run
     p = subparsers.add_parser("run", help="Run a command in boq (must be running; may be interrupted by stop/destroy)")

@@ -1421,6 +1421,22 @@ class Boq:
         if runtime == RUNTIME_PODMAN and shutil.which("podman") is None:
             raise BoqError("Podman runtime requested but 'podman' command is not installed.")
 
+    def _ensure_vscode_available(self) -> None:
+        """Validate VS Code CLI and Dev Containers extension."""
+        if shutil.which("code") is None:
+            raise BoqError(
+                "VS Code CLI ('code') not found. Install VS Code and ensure 'code' is in PATH."
+            )
+        result = run_cmd(["code", "--list-extensions"], capture=True, check=False)
+        if result.returncode != 0:
+            raise BoqError(f"Failed to query VS Code extensions (exit {result.returncode}).")
+        ext_id = "ms-vscode-remote.remote-containers"
+        if ext_id not in result.stdout.strip().splitlines():
+            raise BoqError(
+                f"VS Code extension '{ext_id}' not installed.\n"
+                f"Install with: code --install-extension {ext_id}"
+            )
+
     def _cleanup_failed_create(self) -> None:
         """Best-effort cleanup for partially created boq."""
         data = self.data_dir
@@ -1532,6 +1548,89 @@ class Boq:
             # (either exclusive after setup, or shared after shell exits)
             self._lock._release()
 
+    def _ensure_started(self, migrate_to_docker: bool = False) -> None:
+        """Ensure container is running. Must be called under exclusive lock."""
+        running_type = self._running_container_type_for_instance()
+        existing_runtime = self.get_runtime()
+        # Backward compatibility: migrate legacy .ip metadata under exclusive lock.
+        self._migrate_legacy_ip_to_settings()
+        if migrate_to_docker and running_type is None and existing_runtime != RUNTIME_DOCKER:
+            self._ensure_runtime_available(RUNTIME_DOCKER)
+            self._save_runtime(RUNTIME_DOCKER)
+            self._save_use_sudo(self._default_docker_sudo())
+        elif not existing_runtime:
+            # Backward compatibility: legacy boqs default to podman.
+            if running_type in {CONTAINER_TYPE_DOCKER, CONTAINER_TYPE_DOCKER_SUDO}:
+                self._save_runtime(RUNTIME_DOCKER)
+                self._save_use_sudo(running_type == CONTAINER_TYPE_DOCKER_SUDO)
+            elif running_type == CONTAINER_TYPE_PODMAN_ROOTLESS:
+                self._save_runtime(RUNTIME_PODMAN)
+                self._save_use_sudo(False)
+            else:
+                self._save_runtime(RUNTIME_PODMAN)
+                self._save_use_sudo(True)
+
+        if not self.is_running():
+            # Clean up stale container state from all backends.
+            if self._container_exists_for_instance():
+                self._remove_container_all_backends()
+
+            # Legacy boqs may not have persisted IP. Allocate one before rootful start.
+            runtime_for_start = self._effective_runtime()
+            if self._should_use_static_ip_for_runtime(runtime_for_start):
+                global_lock = get_global_lock(self.boq_root, timeout=self._lock_timeout)
+                with global_lock.exclusive():
+                    current_ip = self.get_ip()
+                    needs_ip = (
+                        not current_ip
+                        or not self._ip_matches_runtime_subnet(
+                            current_ip,
+                            runtime_for_start,
+                            assume_global_lock=True,
+                        )
+                    )
+                    if needs_ip:
+                        self._save_ip(self._allocate_ip_for_runtime(runtime_for_start, assume_global_lock=True))
+
+            # Create missing overlay directories (for newly added overlays)
+            for src_path, overlay_name, merged in self.overlay_dirs():
+                if not merged.exists():
+                    self.create_overlay_dirs(overlay_name)
+
+            # Mount and start; if startup fails, roll back mounts/container state.
+            overlays_mounted = False
+            try:
+                self.mount_all_overlays()
+                overlays_mounted = True
+                self.start_container()
+            except Exception as e:
+                try:
+                    self._remove_container_all_backends()
+                    self._remove_hosts()
+                    if overlays_mounted:
+                        self.unmount_all_overlays()
+                except Exception as cleanup_err:
+                    logging.getLogger("boq").warning(
+                        "Cleanup after failed enter-start for %s failed: %s",
+                        self.name, cleanup_err,
+                    )
+
+                if isinstance(e, BoqError):
+                    raise
+                if isinstance(e, subprocess.CalledProcessError):
+                    cmd = e.cmd
+                    if isinstance(cmd, (list, tuple)):
+                        cmd_text = shlex.join([str(p) for p in cmd])
+                    else:
+                        cmd_text = str(cmd)
+                    raise BoqError(
+                        f"Failed to start container for boq '{self.name}': "
+                        f"command exited with code {e.returncode}: {cmd_text}"
+                    ) from e
+                raise BoqError(
+                    f"Failed to start container for boq '{self.name}': {e}"
+                ) from e
+
     def enter(self, workdir: str | None = None, migrate_to_docker: bool = False) -> int:
         """Enter the boq shell. Returns exit code.
 
@@ -1555,91 +1654,22 @@ class Boq:
 
         # Slow path: need to start container, acquire exclusive lock first
         with self._lock.exclusive() as lock:
-            # Double-check after acquiring lock (another process might have started it)
-            running_type = self._running_container_type_for_instance()
-            existing_runtime = self.get_runtime()
-            # Backward compatibility: migrate legacy .ip metadata under exclusive lock.
-            self._migrate_legacy_ip_to_settings()
-            if migrate_to_docker and running_type is None and existing_runtime != RUNTIME_DOCKER:
-                self._ensure_runtime_available(RUNTIME_DOCKER)
-                self._save_runtime(RUNTIME_DOCKER)
-                self._save_use_sudo(self._default_docker_sudo())
-            elif not existing_runtime:
-                # Backward compatibility: legacy boqs default to podman.
-                if running_type in {CONTAINER_TYPE_DOCKER, CONTAINER_TYPE_DOCKER_SUDO}:
-                    self._save_runtime(RUNTIME_DOCKER)
-                    self._save_use_sudo(running_type == CONTAINER_TYPE_DOCKER_SUDO)
-                elif running_type == CONTAINER_TYPE_PODMAN_ROOTLESS:
-                    self._save_runtime(RUNTIME_PODMAN)
-                    self._save_use_sudo(False)
-                else:
-                    self._save_runtime(RUNTIME_PODMAN)
-                    self._save_use_sudo(True)
-
-            if not self.is_running():
-                # Clean up stale container state from all backends.
-                if self._container_exists_for_instance():
-                    self._remove_container_all_backends()
-
-                # Legacy boqs may not have persisted IP. Allocate one before rootful start.
-                runtime_for_start = self._effective_runtime()
-                if self._should_use_static_ip_for_runtime(runtime_for_start):
-                    global_lock = get_global_lock(self.boq_root, timeout=self._lock_timeout)
-                    with global_lock.exclusive():
-                        current_ip = self.get_ip()
-                        needs_ip = (
-                            not current_ip
-                            or not self._ip_matches_runtime_subnet(
-                                current_ip,
-                                runtime_for_start,
-                                assume_global_lock=True,
-                            )
-                        )
-                        if needs_ip:
-                            self._save_ip(self._allocate_ip_for_runtime(runtime_for_start, assume_global_lock=True))
-
-                # Create missing overlay directories (for newly added overlays)
-                for src_path, overlay_name, merged in self.overlay_dirs():
-                    if not merged.exists():
-                        self.create_overlay_dirs(overlay_name)
-
-                # Mount and start; if startup fails, roll back mounts/container state.
-                overlays_mounted = False
-                try:
-                    self.mount_all_overlays()
-                    overlays_mounted = True
-                    self.start_container()
-                except Exception as e:
-                    try:
-                        self._remove_container_all_backends()
-                        self._remove_hosts()
-                        if overlays_mounted:
-                            self.unmount_all_overlays()
-                    except Exception as cleanup_err:
-                        logging.getLogger("boq").warning(
-                            "Cleanup after failed enter-start for %s failed: %s",
-                            self.name, cleanup_err,
-                        )
-
-                    if isinstance(e, BoqError):
-                        raise
-                    if isinstance(e, subprocess.CalledProcessError):
-                        cmd = e.cmd
-                        if isinstance(cmd, (list, tuple)):
-                            cmd_text = shlex.join([str(p) for p in cmd])
-                        else:
-                            cmd_text = str(cmd)
-                        raise BoqError(
-                            f"Failed to start container for boq '{self.name}': "
-                            f"command exited with code {e.returncode}: {cmd_text}"
-                        ) from e
-                    raise BoqError(
-                        f"Failed to start container for boq '{self.name}': {e}"
-                    ) from e
+            self._ensure_started(migrate_to_docker=migrate_to_docker)
 
             # Downgrade to shared lock for shell execution
             lock.downgrade_to_shared()
             return self._exec_shell(workdir)
+
+    def code(self, workdir: str | None = None) -> int:
+        """Open VS Code attached to boq. Starts container if needed. Returns 0."""
+        if not self.exists():
+            raise BoqError(f"Boq '{self.name}' not found")
+        self._ensure_vscode_available()
+        if not self.is_running():
+            with self._lock.exclusive():
+                self._ensure_started()
+        self.open_vscode(workdir)
+        return 0
 
     def _exec_shell(self, workdir: str | None = None) -> int:
         """Execute shell in container."""
@@ -1668,6 +1698,16 @@ class Boq:
         except FileNotFoundError as e:
             raise BoqError(f"Failed to execute shell backend command: {e}")
         return result.returncode
+
+    def open_vscode(self, workdir: str | None = None) -> None:
+        """Launch VS Code attached to this boq's container."""
+        self._ensure_vscode_available()
+        if not self.is_running():
+            raise BoqError(f"Boq '{self.name}' is not running")
+        folder = workdir or os.getcwd()
+        hex_name = self.container_name.encode().hex()
+        uri = f"vscode-remote://attached-container+{hex_name}{folder}"
+        run_cmd(["code", "--folder-uri", uri], check=False)
 
     def run(self, command: str | list[str], workdir: str | None = None) -> int:
         """
