@@ -78,7 +78,11 @@ def cmd_create(args: argparse.Namespace) -> int:
                 enter=True,
                 runtime=args.runtime,
                 docker_sudo=args.docker_sudo,
+                data_dir=args.data_dir,
             )
+            data = boq.data_dir
+            if data != boq.boq_dir:
+                log_info(f"Data dir: {data}")
             ip = boq.get_ip()
             if ip:
                 log_info(f"IP: {ip}  Hostname: {boq.container_name}")
@@ -88,9 +92,13 @@ def cmd_create(args: argparse.Namespace) -> int:
                 enter=False,
                 runtime=args.runtime,
                 docker_sudo=args.docker_sudo,
+                data_dir=args.data_dir,
             )
             log_ok(f"Created boq: {args.name}")
             log_info(f"Location: {boq.boq_dir}")
+            data = boq.data_dir
+            if data != boq.boq_dir:
+                log_info(f"Data dir: {data}")
             ip = boq.get_ip()
             if ip:
                 log_info(f"IP: {ip}  Hostname: {boq.container_name}")
@@ -267,8 +275,9 @@ def cmd_diff(args: argparse.Namespace) -> int:
     # Collect output
     output_lines = []
 
+    data = boq.data_dir
     for src_path, overlay_name, _ in boq.overlay_dirs():
-        upper = boq.boq_dir / overlay_name / "upper"
+        upper = data / overlay_name / "upper"
 
         # Determine search path
         search_path = upper
@@ -299,7 +308,7 @@ def cmd_diff(args: argparse.Namespace) -> int:
     # Disk usage
     output_lines.append(f"{Colors.BLUE}=== Disk usage ==={Colors.NC}")
     for src_path, overlay_name, _ in boq.overlay_dirs():
-        upper = boq.boq_dir / overlay_name / "upper"
+        upper = data / overlay_name / "upper"
 
         search_path = upper
         display_path = src_path
@@ -351,6 +360,8 @@ def cmd_status(args: argparse.Namespace) -> int:
 
     print(f"{Colors.BLUE}Boq: {status['name']}{Colors.NC}")
     print(f"  Location: {status['location']}")
+    if status.get("data_dir"):
+        print(f"  Data dir: {status['data_dir']}")
     print(f"  Container Type: {status.get('container_type', 'unknown')}")
     print(f"  Runtime Mode: {'sudo' if status.get('use_sudo') else 'direct'}")
     if status.get("ip"):
@@ -466,6 +477,14 @@ def cmd_list(args: argparse.Namespace) -> int:
         line_parts.append(r["status_colored"])
         print("  " + "  ".join(line_parts))
 
+    # Show data_dir info for instances with custom data dirs
+    data_dir_entries = [(b["name"], b["data_dir"]) for b in boqs if "data_dir" in b]
+    if data_dir_entries:
+        print()
+        print(f"{Colors.BLUE}Custom data directories:{Colors.NC}")
+        for name, dd in data_dir_entries:
+            print(f"  {name}: {dd}")
+
     return 0
 
 
@@ -513,7 +532,7 @@ _boq_completions() {
             ;;
         create)
             if [[ "$cur" == -* ]]; then
-                COMPREPLY=( $(compgen -W "--no-enter --runtime --docker-sudo --no-docker-sudo" -- "$cur") )
+                COMPREPLY=( $(compgen -W "--no-enter --runtime --docker-sudo --no-docker-sudo --data-dir" -- "$cur") )
             else
                 COMPREPLY=()
                 compopt +o default 2>/dev/null
@@ -553,7 +572,7 @@ _boq_completions() {
     case "$cmd" in
         create)
             if [[ "$cur" == -* ]]; then
-                COMPREPLY=( $(compgen -W "--no-enter --runtime --docker-sudo --no-docker-sudo" -- "$cur") )
+                COMPREPLY=( $(compgen -W "--no-enter --runtime --docker-sudo --no-docker-sudo --data-dir" -- "$cur") )
             fi
             ;;
         enter)
@@ -660,6 +679,10 @@ Examples:
         action=argparse.BooleanOptionalAction,
         default=None,
         help="Use sudo for docker commands (docker runtime only)",
+    )
+    p.add_argument(
+        "--data-dir",
+        help="Base path for overlay data (instance name appended automatically)",
     )
     p.set_defaults(func=cmd_create, enter=True)
 

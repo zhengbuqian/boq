@@ -217,6 +217,29 @@ def safe_rmtree(path: Path) -> None:
     run_sudo(["rm", "-rf", str(resolved)])
 
 
+def safe_rmtree_data_dir(path: Path, expected: Path) -> None:
+    """Safely remove a data_dir directory outside ~/.boq/.
+
+    Safeguards:
+    1. Resolved path must match expected value
+    2. Path depth >= 3 components (e.g., /mnt/disk/boq/name)
+    3. Must not be in dangerous paths blacklist
+    """
+    resolved = path.resolve()
+    if resolved != expected.resolve():
+        raise BoqError(f"Refusing to delete: resolved {resolved} != expected {expected.resolve()}")
+
+    resolved_str = str(resolved)
+
+    if len(resolved.parts) < 3:
+        raise BoqError(f"Refusing to delete: path {resolved} is too shallow")
+
+    if resolved_str in _DANGEROUS_PATHS or resolved_str.rstrip("/") in _DANGEROUS_PATHS:
+        raise BoqError(f"Refusing to delete dangerous path: {resolved}")
+
+    run_sudo(["rm", "-rf", str(resolved)])
+
+
 def escape_mount_opt(path: str | Path) -> str:
     """Escape path for use in mount options."""
     return str(path).replace(",", "\\,")
@@ -372,6 +395,17 @@ class Boq:
 
     def _get_setting(self, key: str):
         return self._load_settings().get(key)
+
+    @property
+    def data_dir(self) -> Path:
+        """Overlay data directory. Defaults to boq_dir if not configured."""
+        configured = self._get_setting("data_dir")  # settings.json (authoritative)
+        if configured:
+            return Path(configured)
+        config_val = self.config.data_dir  # config.toml fallback
+        if config_val:
+            return Path(config_val) / self.name
+        return self.boq_dir  # default
 
     def get_runtime(self) -> str | None:
         """Read persisted runtime ('podman'|'docker') if available."""
@@ -891,7 +925,7 @@ class Boq:
         Returns: (source_path, overlay_name, merged_path)
         """
         for src_path, overlay_name in self.config.overlays.items():
-            merged = self.boq_dir / overlay_name / "merged"
+            merged = self.data_dir / overlay_name / "merged"
             yield src_path, overlay_name, merged
 
     def mount_overlay(self, src_path: str, overlay_name: str) -> None:
@@ -899,12 +933,12 @@ class Boq:
         if not Path(src_path).is_dir():
             return
 
-        merged = self.boq_dir / overlay_name / "merged"
+        merged = self.data_dir / overlay_name / "merged"
         if is_mountpoint(merged):
             return
 
-        upper = self.boq_dir / overlay_name / "upper"
-        work = self.boq_dir / overlay_name / "work"
+        upper = self.data_dir / overlay_name / "upper"
+        work = self.data_dir / overlay_name / "work"
 
         # Escape paths for mount options
         opts = (
@@ -927,7 +961,7 @@ class Boq:
 
     def unmount_overlay(self, overlay_name: str) -> None:
         """Unmount a single overlay."""
-        merged = self.boq_dir / overlay_name / "merged"
+        merged = self.data_dir / overlay_name / "merged"
         if is_mountpoint(merged):
             run_sudo(["umount", str(merged)], check=False)
 
@@ -937,17 +971,22 @@ class Boq:
         for _, overlay_name, _ in self.overlay_dirs():
             self.unmount_overlay(overlay_name)
 
-        # Safety net: check /proc/mounts for any remaining mounts under boq_dir
+        # Safety net: check /proc/mounts for any remaining mounts under boq_dir and data_dir
         # This handles cases where config changed or overlays were renamed
+        prefixes = set()
         if self.boq_dir.exists():
-            boq_prefix = str(self.boq_dir) + "/"
+            prefixes.add(str(self.boq_dir) + "/")
+        data = self.data_dir
+        if data != self.boq_dir and data.exists():
+            prefixes.add(str(data) + "/")
+        if prefixes:
             try:
                 remaining = []
                 for line in Path("/proc/mounts").read_text().splitlines():
                     parts = line.split()
                     if len(parts) >= 2:
                         target = parts[1]
-                        if target.startswith(boq_prefix):
+                        if any(target.startswith(p) for p in prefixes):
                             remaining.append(target)
                 # Unmount deepest paths first
                 for target in sorted(remaining, key=len, reverse=True):
@@ -957,7 +996,7 @@ class Boq:
 
     def create_overlay_dirs(self, overlay_name: str) -> None:
         """Create overlay directory structure."""
-        base = self.boq_dir / overlay_name
+        base = self.data_dir / overlay_name
         (base / "upper").mkdir(parents=True, exist_ok=True)
         (base / "work").mkdir(parents=True, exist_ok=True)
         (base / "merged").mkdir(parents=True, exist_ok=True)
@@ -1384,9 +1423,12 @@ class Boq:
 
     def _cleanup_failed_create(self) -> None:
         """Best-effort cleanup for partially created boq."""
+        data = self.data_dir
         self._remove_container_all_backends()
         self._remove_hosts()
         self.unmount_all_overlays()
+        if data != self.boq_dir and data.exists():
+            safe_rmtree_data_dir(data, data)
         if self.boq_dir.exists():
             safe_rmtree(self.boq_dir)
 
@@ -1396,6 +1438,7 @@ class Boq:
         workdir: str | None = None,
         runtime: str | None = None,
         docker_sudo: bool | None = None,
+        data_dir: str | None = None,
     ) -> int:
         """Create a new boq.
 
@@ -1404,6 +1447,7 @@ class Boq:
             workdir: Working directory for the shell.
             runtime: Runtime backend ('podman'|'docker'). If unset, use configured default.
             docker_sudo: Whether to run docker with sudo (docker runtime only).
+            data_dir: Base path for overlay data. Instance name is appended automatically.
 
         Returns:
             Shell exit code if enter=True, otherwise 0.
@@ -1423,6 +1467,16 @@ class Boq:
                 self.boq_dir.mkdir(parents=True, exist_ok=True)
                 self._save_runtime(selected_runtime)
                 self._save_use_sudo(selected_use_sudo)
+
+                # Resolve and persist data_dir
+                resolved_data_dir: str | None = None
+                if data_dir:
+                    resolved_data_dir = str(Path(data_dir) / self.name)
+                elif self.config.data_dir:
+                    resolved_data_dir = str(Path(self.config.data_dir) / self.name)
+                if resolved_data_dir:
+                    self._set_setting("data_dir", resolved_data_dir)
+                    Path(resolved_data_dir).mkdir(parents=True, exist_ok=True)
 
                 # Allocate static IP (safe under global lock - no races)
                 if self._should_use_static_ip_for_runtime(selected_runtime):
@@ -1679,12 +1733,17 @@ class Boq:
         if not self.exists():
             raise BoqError(f"Boq '{self.name}' not found")
 
+        # Read data_dir before deleting settings.json
+        data = self.data_dir
         self.stop_container()
         self.unmount_all_overlays()
+        if data != self.boq_dir and data.exists():
+            safe_rmtree_data_dir(data, data)
         safe_rmtree(self.boq_dir)
 
     def get_status(self) -> dict:
         """Get boq status information."""
+        data = self.data_dir
         status = {
             "name": self.name,
             "location": str(self.boq_dir),
@@ -1697,6 +1756,8 @@ class Boq:
             "overlays": {},
             "changes": {},
         }
+        if data != self.boq_dir:
+            status["data_dir"] = str(data)
 
         if not self.exists():
             return status
@@ -1704,7 +1765,7 @@ class Boq:
         for src_path, overlay_name, merged in self.overlay_dirs():
             status["overlays"][src_path] = is_mountpoint(merged)
 
-            upper = self.boq_dir / overlay_name / "upper"
+            upper = data / overlay_name / "upper"
             if upper.exists():
                 result = run_cmd(["du", "-sh", str(upper)], capture=True, check=False)
                 if result.returncode == 0:
@@ -1727,24 +1788,27 @@ def list_boqs(show_size: bool = False) -> list[dict]:
         if not item.is_dir():
             continue
 
-        # Skip if not a boq directory (check for overlay dirs)
+        # Skip if not a boq directory (check for overlay dirs or settings.json)
         has_overlay = False
         for _, overlay_name in config.overlays.items():
             if (item / overlay_name).is_dir():
                 has_overlay = True
                 break
 
-        if not has_overlay:
+        has_settings = (item / "settings.json").is_file()
+
+        if not has_overlay and not has_settings:
             continue
 
         name = item.name
         boq = Boq(name)
+        data = boq.data_dir
 
         # Calculate total size (only when requested)
         total_size = 0
         if show_size:
             for _, overlay_name, _ in boq.overlay_dirs():
-                upper = boq.boq_dir / overlay_name / "upper"
+                upper = data / overlay_name / "upper"
                 if upper.is_dir():
                     result = run_cmd(["du", "-sb", str(upper)], capture=True, check=False)
                     if result.returncode == 0:
@@ -1764,7 +1828,7 @@ def list_boqs(show_size: bool = False) -> list[dict]:
                     mounted = True
                     break
 
-        boqs.append({
+        entry = {
             "name": name,
             "size": total_size,
             "running": running,
@@ -1774,7 +1838,10 @@ def list_boqs(show_size: bool = False) -> list[dict]:
             "runtime": runtime,
             "container_type": container_type,
             "use_sudo": boq._effective_use_sudo(runtime),
-        })
+        }
+        if data != boq.boq_dir:
+            entry["data_dir"] = str(data)
+        boqs.append(entry)
 
     return boqs
 

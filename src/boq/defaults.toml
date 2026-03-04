@@ -74,6 +74,12 @@ SSH_AUTH_SOCK = "$SSH_AUTH_SOCK"
 # PulseAudio server for audio support
 PULSE_SERVER = "$PULSE_SERVER"
 
+[instance]
+# Base directory for overlay data (upper/work/merged) for new instances.
+# When set, overlay data goes to <data_dir>/<name>/ instead of ~/.boq/<name>/.
+# Metadata (settings.json, config.toml, .lock) always stays in ~/.boq/<name>/.
+# data_dir = "/mnt/big-disk/boq"
+
 [overlays]
 # Directories isolated with copy-on-write using kernel overlayfs
 # Format: "source_path" = "overlay_name"
