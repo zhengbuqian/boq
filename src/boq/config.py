@@ -185,6 +185,11 @@ class Config:
         return self.mounts.get("custom", [])
 
     @property
+    def data_dir(self) -> str | None:
+        """Base data_dir from [instance] config (before appending instance name)."""
+        return self._config.get("instance", {}).get("data_dir")
+
+    @property
     def etc_files(self) -> list[str]:
         """Files from /etc to mount."""
         return self.mounts.get("etc_files", [])
