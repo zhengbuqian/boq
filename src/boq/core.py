@@ -1258,9 +1258,9 @@ class Boq:
             "--user", f"{os.getuid()}:{os.getgid()}",
             "--hostname", self.container_name,
         ] + volumes + [
-            "--tmpfs", "/tmp:mode=1777",
+            "--tmpfs", "/tmp:exec,mode=1777",
             "--tmpfs", "/run",
-            "--tmpfs", "/var/tmp:mode=1777",
+            "--tmpfs", "/var/tmp:exec,mode=1777",
             "--cap-drop", "ALL",
         ] + cap_args + optional_args + [
             "--security-opt", "no-new-privileges",
