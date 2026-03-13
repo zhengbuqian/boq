@@ -560,16 +560,16 @@ class Boq:
                 return str(candidate)
         raise BoqError("No available subnet found for docker network (tried 10.200.0.0/16-10.254.0.0/16).")
 
+    def _subnet_overlaps_occupied_networks(self, subnet: str) -> bool:
+        """Check whether subnet overlaps currently occupied host/container networks."""
+        candidate = ipaddress.ip_network(subnet, strict=True)
+        return any(candidate.overlaps(net) for net in self._collect_occupied_networks())
+
     def _get_or_allocate_docker_subnet_locked(self) -> str:
         """Get persisted docker subnet or allocate one.
 
         Caller must hold global lock.
         """
-        subnet = self._load_docker_subnet()
-        if subnet:
-            return subnet
-
-        # If network already exists, adopt its subnet for compatibility.
         docker_prefix = self._runtime_prefix(RUNTIME_DOCKER)
         try:
             existing = run_cmd(
@@ -600,16 +600,16 @@ class Boq:
                     f"cannot choose one automatically. Set {self._docker_subnet_file()} manually."
                 )
 
+        subnet = self._load_docker_subnet()
+        if subnet and not self._subnet_overlaps_occupied_networks(subnet):
+            return subnet
+
         subnet = self._pick_docker_subnet()
         self._save_docker_subnet(subnet)
         return subnet
 
     def _get_or_allocate_docker_subnet(self) -> str:
         """Get persisted docker subnet or allocate and persist one."""
-        subnet = self._load_docker_subnet()
-        if subnet:
-            return subnet
-
         global_lock = get_global_lock(self.boq_root, timeout=self._lock_timeout)
         with global_lock.exclusive():
             return self._get_or_allocate_docker_subnet_locked()
