@@ -1199,8 +1199,12 @@ class Boq:
             "--mount", "type=tmpfs,dst=/var/tmp,tmpfs-mode=1777",
             "--cap-drop", "ALL",
             "--cap-add", "CHOWN,DAC_OVERRIDE,FOWNER,FSETID,SETGID,SETUID,NET_BIND_SERVICE",
-        ] + cap_add + optional_args + [
-            "--security-opt", "no-new-privileges",
+        ] + cap_add + optional_args
+
+        if self.config.get("container.no_new_privileges", False):
+            cmd += ["--security-opt", "no-new-privileges"]
+
+        cmd += [
             "--pids-limit", "4096",
         ] + env_args + [
             image,
@@ -1262,8 +1266,12 @@ class Boq:
             "--tmpfs", "/run",
             "--tmpfs", "/var/tmp:exec,mode=1777",
             "--cap-drop", "ALL",
-        ] + cap_args + optional_args + [
-            "--security-opt", "no-new-privileges",
+        ] + cap_args + optional_args
+
+        if self.config.get("container.no_new_privileges", False):
+            cmd += ["--security-opt", "no-new-privileges"]
+
+        cmd += [
             "--pids-limit", "4096",
         ] + env_args + [
             image,
@@ -1316,28 +1324,34 @@ class Boq:
         if create.returncode == 0:
             return
 
-        # Handle races (created by another process in between).
-        try:
-            result = run_cmd(
-                docker_prefix + ["docker", "network", "inspect", self._DOCKER_NETWORK_NAME, "--format", "{{range .IPAM.Config}}{{println .Subnet}}{{end}}"],
-                check=False,
-                capture=True,
-            )
-        except FileNotFoundError:
-            raise BoqError("Docker runtime selected but 'docker' command is not available.")
-        if result.returncode == 0:
-            existing = {line.strip() for line in result.stdout.splitlines() if line.strip()}
-            if subnet in existing:
-                return
-            existing_str = ", ".join(sorted(existing)) if existing else "(no subnet)"
-            raise BoqError(
-                f"Docker network '{self._DOCKER_NETWORK_NAME}' exists with subnet {existing_str}, "
-                f"expected {subnet}. Remove/recreate the network or delete {self._docker_subnet_file()}."
-            )
+        stderr = create.stderr.strip() if create.stderr else ""
 
-        stderr = create.stderr.strip() if create.stderr else "unknown error"
+        # Handle races (created by another process in between).
+        # Also handles podman compatibility where inspect --format may fail
+        # even though the network exists.
+        if "already exists" in stderr:
+            try:
+                result = run_cmd(
+                    docker_prefix + ["docker", "network", "inspect", self._DOCKER_NETWORK_NAME, "--format", "{{range .IPAM.Config}}{{println .Subnet}}{{end}}"],
+                    check=False,
+                    capture=True,
+                )
+            except FileNotFoundError:
+                raise BoqError("Docker runtime selected but 'docker' command is not available.")
+            if result.returncode == 0:
+                existing = {line.strip() for line in result.stdout.splitlines() if line.strip()}
+                if subnet in existing:
+                    return
+                existing_str = ", ".join(sorted(existing)) if existing else "(no subnet)"
+                raise BoqError(
+                    f"Docker network '{self._DOCKER_NETWORK_NAME}' exists with subnet {existing_str}, "
+                    f"expected {subnet}. Remove/recreate the network or delete {self._docker_subnet_file()}."
+                )
+            # Network exists (create said so) but inspect failed (podman compat) — proceed anyway.
+            return
+
         raise BoqError(
-            f"Failed to create docker network '{self._DOCKER_NETWORK_NAME}': {stderr}"
+            f"Failed to create docker network '{self._DOCKER_NETWORK_NAME}': {stderr or 'unknown error'}"
         )
 
     def _remove_container_all_backends(self) -> None:

@@ -33,6 +33,10 @@ capabilities = ["SYS_PTRACE"]
 # Map host devices into the container (e.g., GPU, USB devices)
 # devices = ["/dev/dri", "/dev/nvidia0", "/dev/nvidiactl", "/dev/nvidia-uvm"]
 
+# Prevent privilege escalation inside the container (blocks sudo)
+# Set to true to add --security-opt no-new-privileges
+no_new_privileges = false
+
 # Extra podman arguments (optional)
 # For advanced use cases not covered by other options
 # extra_args = ["--shm-size=2g", "--ulimit", "nofile=65535:65535"]
