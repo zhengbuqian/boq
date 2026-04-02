@@ -111,10 +111,14 @@ paths = [
     "$HOME/.bash_history",
 
     # AI assistant configs
+    "$HOME/.agents",
+    "$HOME/.amp",
+    "$HOME/.antigravity-server",
     "$HOME/.claude",
-    "$HOME/.gemini",
     "$HOME/.codex",
     "$HOME/.factory",
+    "$HOME/.gemini",
+    "$HOME/.opencode",
 ]
 
 [mounts]

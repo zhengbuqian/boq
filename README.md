@@ -2,6 +2,10 @@
 
 Isolated development environment using Linux kernel overlayfs.
 
+Boq is a cli tool, but also see a demo of how I use it in my Telegram + Claude Code workflow: [Telegram as a multi-machine, multi-project Claude Code cockpit — with instant sandboxed environments](blog/blog.md).
+
+![boq demo](blog/telegram_cc-connect_demo.gif)
+
 ## Why boq?
 
 `boq` allows:
